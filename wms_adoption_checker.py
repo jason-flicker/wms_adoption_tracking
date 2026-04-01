@@ -3,10 +3,9 @@
 WMS Feature Adoption Checker
 Scalable: configure FEATURES and MARKETS below, run once.
 
-Prerequisites:
-    - Close Google Chrome completely (Cmd+Q) before running.
-    - The script opens Chrome with your real profile so your existing
-      WMS/Google session is reused — no login required.
+First run:  opens a browser window, you log in manually via Google SSO,
+            then press Enter — session is saved to wms_session.json.
+Later runs: session is reused automatically (no login needed).
 
 Usage:
     python3 wms_adoption_checker.py
@@ -16,10 +15,8 @@ Output:
 """
 
 import re
-import sys
 import asyncio
 import datetime
-import subprocess
 from pathlib import Path
 from playwright.async_api import async_playwright
 from openpyxl import Workbook
@@ -54,39 +51,10 @@ MARKETS = {
     # "SG": ["SGA", ...],
 }
 
-# Use the user's actual Chrome profile so no Google SSO is needed —
-# the existing WMS session cookies are already there.
-# Chrome must be CLOSED before running this script (see check in run()).
-CHROME_PROFILE = str(Path.home() / "Library/Application Support/Google/Chrome")
-OUTPUT_FILE    = str(Path(__file__).parent / "wms_adoption_results.xlsx")
+SESSION_FILE = str(Path(__file__).parent / "wms_session.json")
+OUTPUT_FILE  = str(Path(__file__).parent / "wms_adoption_results.xlsx")
 
 # ─── SCRAPER ─────────────────────────────────────────────────────────────────
-
-async def _wms_app_loaded(page) -> bool:
-    """Return True once the WMS app UI has rendered (i.e. user is logged in)."""
-    try:
-        return await page.evaluate("""() =>
-            document.querySelector('[class*="ssc-"]') !== null ||
-            document.querySelector('.ant-layout-sider') !== null
-        """)
-    except Exception:
-        return False
-
-
-async def wait_for_login(page, target_url: str):
-    """Poll until WMS app UI elements appear, then navigate to target."""
-    print("\n⚠️  Session expired — complete login in the browser window. Script resumes automatically.")
-    while True:
-        await page.wait_for_timeout(1500)
-        try:
-            if await _wms_app_loaded(page):
-                break
-        except Exception:
-            raise Exception("Browser was closed before login completed. Please re-run the script.")
-    print("✅ Login detected — continuing...")
-    await page.goto(target_url, wait_until="networkidle", timeout=30000)
-    await page.wait_for_timeout(1000)
-
 
 async def get_config_value(page, signal_label: str) -> str:
     """Extract Yes/No value for a given signal label from the current page."""
@@ -161,31 +129,24 @@ async def run():
     results = []
 
     async with async_playwright() as p:
-        # Guard: Chrome must be closed — can't share a profile with a running instance.
-        chrome_procs = subprocess.run(
-            ["pgrep", "-x", "Google Chrome"], capture_output=True
-        ).returncode
-        if chrome_procs == 0:
-            print("❌ Google Chrome is currently running.")
-            print("   Please quit Chrome completely (Cmd+Q), then re-run this script.")
-            print("   The script uses your Chrome profile so no Google login is needed.")
-            sys.exit(1)
-
-        print(f"Opening Chrome with your profile ({CHROME_PROFILE})...")
-        context = await p.chromium.launch_persistent_context(
-            user_data_dir=CHROME_PROFILE,
-            channel="chrome",          # real Chrome — can read its own encrypted cookies
+        browser = await p.chromium.launch(
             headless=False,
             args=["--disable-blink-features=AutomationControlled"],
         )
 
-        # If session is still valid, WMS loads directly; otherwise wait for login.
-        page = await context.new_page()
-        await page.goto(BASE_URL, wait_until="networkidle", timeout=30000)
-        if not await _wms_app_loaded(page):
-            await wait_for_login(page, BASE_URL)
-        print("✅ WMS session active. Starting scrape...")
-        await page.close()
+        if Path(SESSION_FILE).exists():
+            print(f"Reusing saved session from {SESSION_FILE}")
+            context = await browser.new_context(storage_state=SESSION_FILE)
+        else:
+            print("No saved session found. Opening browser for manual login...")
+            context = await browser.new_context()
+            page = await context.new_page()
+            await page.goto(BASE_URL, wait_until="networkidle", timeout=30000)
+            print("Please log in via Google SSO, then press Enter here.")
+            input()
+            await context.storage_state(path=SESSION_FILE)
+            print(f"Session saved to {SESSION_FILE}")
+            await page.close()
 
         page = await context.new_page()
 
@@ -238,9 +199,11 @@ async def run():
                         await page.goto(url, wait_until="networkidle", timeout=30000)
                         await page.wait_for_timeout(1000)
 
-                        # Check for session expiry (WMS UI not present = not logged in)
-                        if not await _wms_app_loaded(page):
-                            await wait_for_login(page, url)
+                        # Check for login redirect
+                        if "login" in page.url.lower() or "sso" in page.url.lower():
+                            print("\n⚠️  Login required! Please log in manually, then press Enter.")
+                            input()
+                            await page.goto(url, wait_until="networkidle", timeout=30000)
 
                         # Always switch warehouse explicitly (session is server-side/cookie-based)
                         await select_warehouse_from_dropdown(page, whs)
