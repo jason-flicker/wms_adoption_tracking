@@ -56,6 +56,27 @@ OUTPUT_FILE  = str(Path(__file__).parent / "wms_adoption_results.xlsx")
 
 # ─── SCRAPER ─────────────────────────────────────────────────────────────────
 
+def _is_login_page(url: str) -> bool:
+    u = url.lower()
+    return "login" in u or "sso" in u or "accounts.google" in u or u == "" or u == "about:blank"
+
+
+async def wait_for_login(page, context, target_url: str, session_file: str):
+    """Poll until the page URL is no longer a login/SSO page, then save session."""
+    print("\n⚠️  Login required! Complete login in the browser window — script will continue automatically.")
+    while True:
+        await page.wait_for_timeout(1500)
+        try:
+            if not _is_login_page(page.url):
+                break
+        except Exception:
+            raise Exception("Browser was closed before login completed. Please re-run the script.")
+    await context.storage_state(path=session_file)
+    print("✅ Login detected — session saved. Continuing...")
+    await page.goto(target_url, wait_until="networkidle", timeout=30000)
+    await page.wait_for_timeout(1000)
+
+
 async def get_config_value(page, signal_label: str) -> str:
     """Extract Yes/No value for a given signal label from the current page."""
     try:
@@ -142,9 +163,7 @@ async def run():
             context = await browser.new_context()
             page = await context.new_page()
             await page.goto(BASE_URL, wait_until="networkidle", timeout=30000)
-            print("Please log in via Google SSO, then press Enter here.")
-            input()
-            await context.storage_state(path=SESSION_FILE)
+            await wait_for_login(page, context, BASE_URL, SESSION_FILE)
             print(f"Session saved to {SESSION_FILE}")
             await page.close()
 
@@ -199,11 +218,9 @@ async def run():
                         await page.goto(url, wait_until="networkidle", timeout=30000)
                         await page.wait_for_timeout(1000)
 
-                        # Check for login redirect
-                        if "login" in page.url.lower() or "sso" in page.url.lower():
-                            print("\n⚠️  Login required! Please log in manually, then press Enter.")
-                            input()
-                            await page.goto(url, wait_until="networkidle", timeout=30000)
+                        # Check for login redirect (session expired mid-run)
+                        if _is_login_page(page.url):
+                            await wait_for_login(page, context, url, SESSION_FILE)
 
                         # Always switch warehouse explicitly (session is server-side/cookie-based)
                         await select_warehouse_from_dropdown(page, whs)
