@@ -3,8 +3,8 @@
 WMS Feature Adoption Checker
 Scalable: configure FEATURES and MARKETS below, run once.
 
-First run:  opens a browser window, you log in manually via Google SSO,
-            then press Enter — session is saved to wms_session.json.
+First run:  opens a real Chrome window (dedicated profile), log in via
+            Google SSO, then press Enter — profile is saved to wms_profile/.
 Later runs: session is reused automatically (no login needed).
 
 Usage:
@@ -51,8 +51,8 @@ MARKETS = {
     # "SG": ["SGA", ...],
 }
 
-SESSION_FILE = str(Path(__file__).parent / "wms_session.json")
-OUTPUT_FILE  = str(Path(__file__).parent / "wms_adoption_results.xlsx")
+PROFILE_DIR = str(Path(__file__).parent / "wms_profile")  # dedicated Chrome profile
+OUTPUT_FILE = str(Path(__file__).parent / "wms_adoption_results.xlsx")
 
 # ─── SCRAPER ─────────────────────────────────────────────────────────────────
 
@@ -129,24 +129,26 @@ async def run():
     results = []
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
+        is_first_run = not Path(PROFILE_DIR).exists()
+        # Use real Chrome with a dedicated profile dir so Google OAuth works.
+        # The profile is created on first run and reused on subsequent runs.
+        context = await p.chromium.launch_persistent_context(
+            user_data_dir=PROFILE_DIR,
+            channel="chrome",
             headless=False,
             args=["--disable-blink-features=AutomationControlled"],
         )
 
-        if Path(SESSION_FILE).exists():
-            print(f"Reusing saved session from {SESSION_FILE}")
-            context = await browser.new_context(storage_state=SESSION_FILE)
-        else:
-            print("No saved session found. Opening browser for manual login...")
-            context = await browser.new_context()
+        if is_first_run:
+            print("First run — browser opened. Please log in via Google SSO.")
+            print("Press Enter here once you are fully logged into WMS.")
             page = await context.new_page()
             await page.goto(BASE_URL, wait_until="networkidle", timeout=30000)
-            print("Please log in via Google SSO, then press Enter here.")
             input()
-            await context.storage_state(path=SESSION_FILE)
-            print(f"Session saved to {SESSION_FILE}")
+            print("Session saved to profile. Subsequent runs won't need login.")
             await page.close()
+        else:
+            print(f"Reusing saved profile from {PROFILE_DIR}")
 
         page = await context.new_page()
 
