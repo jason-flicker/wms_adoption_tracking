@@ -3,9 +3,10 @@
 WMS Feature Adoption Checker
 Scalable: configure FEATURES and MARKETS below, run once.
 
-First run:  opens a browser window, you log in manually via Google SSO,
-            then press Enter — session is saved to wms_session.json.
-Later runs: session is reused automatically (no login needed).
+Prerequisites:
+    - Close Google Chrome completely (Cmd+Q) before running.
+    - The script opens Chrome with your real profile so your existing
+      WMS/Google session is reused — no login required.
 
 Usage:
     python3 wms_adoption_checker.py
@@ -15,8 +16,10 @@ Output:
 """
 
 import re
+import sys
 import asyncio
 import datetime
+import subprocess
 from pathlib import Path
 from playwright.async_api import async_playwright
 from openpyxl import Workbook
@@ -51,8 +54,11 @@ MARKETS = {
     # "SG": ["SGA", ...],
 }
 
-PROFILE_DIR  = str(Path(__file__).parent / "wms_profile")   # persistent browser profile
-OUTPUT_FILE  = str(Path(__file__).parent / "wms_adoption_results.xlsx")
+# Use the user's actual Chrome profile so no Google SSO is needed —
+# the existing WMS session cookies are already there.
+# Chrome must be CLOSED before running this script (see check in run()).
+CHROME_PROFILE = str(Path.home() / "Library/Application Support/Google/Chrome")
+OUTPUT_FILE    = str(Path(__file__).parent / "wms_adoption_results.xlsx")
 
 # ─── SCRAPER ─────────────────────────────────────────────────────────────────
 
@@ -155,28 +161,31 @@ async def run():
     results = []
 
     async with async_playwright() as p:
-        # Persistent context: session survives across runs in wms_profile/.
-        # Uses a dedicated profile dir (not the user's real Chrome) so it
-        # never conflicts with a running Chrome instance.
-        is_first_run = not Path(PROFILE_DIR).exists()
+        # Guard: Chrome must be closed — can't share a profile with a running instance.
+        chrome_procs = subprocess.run(
+            ["pgrep", "-x", "Google Chrome"], capture_output=True
+        ).returncode
+        if chrome_procs == 0:
+            print("❌ Google Chrome is currently running.")
+            print("   Please quit Chrome completely (Cmd+Q), then re-run this script.")
+            print("   The script uses your Chrome profile so no Google login is needed.")
+            sys.exit(1)
+
+        print(f"Opening Chrome with your profile ({CHROME_PROFILE})...")
         context = await p.chromium.launch_persistent_context(
-            user_data_dir=PROFILE_DIR,
+            user_data_dir=CHROME_PROFILE,
+            channel="chrome",          # real Chrome — can read its own encrypted cookies
             headless=False,
             args=["--disable-blink-features=AutomationControlled"],
         )
 
-        if is_first_run:
-            print("First run: browser opened — please log in via Google SSO.")
-            print("The script will continue automatically once login is detected.")
-            page = await context.new_page()
-            await page.goto(BASE_URL, timeout=30000)
-            # Poll until real WMS UI elements appear (not URL-based, which is unreliable)
-            while not await _wms_app_loaded(page):
-                await page.wait_for_timeout(1500)
-            print("✅ Login detected — profile saved. Continuing...")
-            await page.close()
-        else:
-            print(f"Reusing saved profile from {PROFILE_DIR}")
+        # If session is still valid, WMS loads directly; otherwise wait for login.
+        page = await context.new_page()
+        await page.goto(BASE_URL, wait_until="networkidle", timeout=30000)
+        if not await _wms_app_loaded(page):
+            await wait_for_login(page, BASE_URL)
+        print("✅ WMS session active. Starting scrape...")
+        await page.close()
 
         page = await context.new_page()
 
