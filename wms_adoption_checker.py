@@ -56,21 +56,24 @@ OUTPUT_FILE  = str(Path(__file__).parent / "wms_adoption_results.xlsx")
 
 # ─── SCRAPER ─────────────────────────────────────────────────────────────────
 
-def _is_login_page(url: str) -> bool:
-    u = url.lower()
-    # /v2/google/login is the WMS OAuth callback — not a login prompt, so exclude it
-    if "wms.ssc.shopee.ph" in u:
+async def _wms_app_loaded(page) -> bool:
+    """Return True once the WMS app UI has rendered (i.e. user is logged in)."""
+    try:
+        return await page.evaluate("""() =>
+            document.querySelector('[class*="ssc-"]') !== null ||
+            document.querySelector('.ant-layout-sider') !== null
+        """)
+    except Exception:
         return False
-    return "login" in u or "sso" in u or "accounts.google" in u or u in ("", "about:blank")
 
 
 async def wait_for_login(page, target_url: str):
-    """Poll until the page URL leaves the login/SSO flow, then continue."""
+    """Poll until WMS app UI elements appear, then navigate to target."""
     print("\n⚠️  Session expired — complete login in the browser window. Script resumes automatically.")
     while True:
         await page.wait_for_timeout(1500)
         try:
-            if not _is_login_page(page.url):
+            if await _wms_app_loaded(page):
                 break
         except Exception:
             raise Exception("Browser was closed before login completed. Please re-run the script.")
@@ -167,8 +170,8 @@ async def run():
             print("The script will continue automatically once login is detected.")
             page = await context.new_page()
             await page.goto(BASE_URL, timeout=30000)
-            # Poll until we land on a real WMS page (not login/SSO/Google)
-            while _is_login_page(page.url):
+            # Poll until real WMS UI elements appear (not URL-based, which is unreliable)
+            while not await _wms_app_loaded(page):
                 await page.wait_for_timeout(1500)
             print("✅ Login detected — profile saved. Continuing...")
             await page.close()
@@ -226,8 +229,8 @@ async def run():
                         await page.goto(url, wait_until="networkidle", timeout=30000)
                         await page.wait_for_timeout(1000)
 
-                        # Check for login redirect (session expired mid-run)
-                        if _is_login_page(page.url):
+                        # Check for session expiry (WMS UI not present = not logged in)
+                        if not await _wms_app_loaded(page):
                             await wait_for_login(page, url)
 
                         # Always switch warehouse explicitly (session is server-side/cookie-based)
