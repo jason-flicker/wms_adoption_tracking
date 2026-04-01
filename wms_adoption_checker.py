@@ -51,7 +51,7 @@ MARKETS = {
     # "SG": ["SGA", ...],
 }
 
-SESSION_FILE = str(Path(__file__).parent / "wms_session.json")
+PROFILE_DIR  = str(Path(__file__).parent / "wms_profile")   # persistent browser profile
 OUTPUT_FILE  = str(Path(__file__).parent / "wms_adoption_results.xlsx")
 
 # ─── SCRAPER ─────────────────────────────────────────────────────────────────
@@ -64,9 +64,9 @@ def _is_login_page(url: str) -> bool:
     return "login" in u or "sso" in u or "accounts.google" in u or u in ("", "about:blank")
 
 
-async def wait_for_login(page, context, target_url: str, session_file: str):
-    """Poll until the page URL is no longer a login/SSO page, then save session."""
-    print("\n⚠️  Login required! Complete login in the browser window — script will continue automatically.")
+async def wait_for_login(page, target_url: str):
+    """Poll until the page URL leaves the login/SSO flow, then continue."""
+    print("\n⚠️  Session expired — complete login in the browser window. Script resumes automatically.")
     while True:
         await page.wait_for_timeout(1500)
         try:
@@ -74,8 +74,7 @@ async def wait_for_login(page, context, target_url: str, session_file: str):
                 break
         except Exception:
             raise Exception("Browser was closed before login completed. Please re-run the script.")
-    await context.storage_state(path=session_file)
-    print("✅ Login detected — session saved. Continuing...")
+    print("✅ Login detected — continuing...")
     await page.goto(target_url, wait_until="networkidle", timeout=30000)
     await page.wait_for_timeout(1000)
 
@@ -153,32 +152,28 @@ async def run():
     results = []
 
     async with async_playwright() as p:
-        # Use real Chrome (not bundled Chromium) so Google OAuth works correctly.
-        # Falls back to bundled Chromium if Chrome is not installed.
-        try:
-            browser = await p.chromium.launch(
-                channel="chrome",
-                headless=False,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
-        except Exception:
-            print("⚠️  Real Chrome not found, falling back to Chromium (Google login may fail).")
-            browser = await p.chromium.launch(
-                headless=False,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
+        # Persistent context: session survives across runs in wms_profile/.
+        # Uses a dedicated profile dir (not the user's real Chrome) so it
+        # never conflicts with a running Chrome instance.
+        is_first_run = not Path(PROFILE_DIR).exists()
+        context = await p.chromium.launch_persistent_context(
+            user_data_dir=PROFILE_DIR,
+            headless=False,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
 
-        if Path(SESSION_FILE).exists():
-            print(f"Reusing saved session from {SESSION_FILE}")
-            context = await browser.new_context(storage_state=SESSION_FILE)
-        else:
-            print("No saved session found. Opening browser for manual login...")
-            context = await browser.new_context()
+        if is_first_run:
+            print("First run: browser opened — please log in via Google SSO.")
+            print("The script will continue automatically once login is detected.")
             page = await context.new_page()
-            await page.goto(BASE_URL, wait_until="networkidle", timeout=30000)
-            await wait_for_login(page, context, BASE_URL, SESSION_FILE)
-            print(f"Session saved to {SESSION_FILE}")
+            await page.goto(BASE_URL, timeout=30000)
+            # Poll until we land on a real WMS page (not login/SSO/Google)
+            while _is_login_page(page.url):
+                await page.wait_for_timeout(1500)
+            print("✅ Login detected — profile saved. Continuing...")
             await page.close()
+        else:
+            print(f"Reusing saved profile from {PROFILE_DIR}")
 
         page = await context.new_page()
 
@@ -233,7 +228,7 @@ async def run():
 
                         # Check for login redirect (session expired mid-run)
                         if _is_login_page(page.url):
-                            await wait_for_login(page, context, url, SESSION_FILE)
+                            await wait_for_login(page, url)
 
                         # Always switch warehouse explicitly (session is server-side/cookie-based)
                         await select_warehouse_from_dropdown(page, whs)

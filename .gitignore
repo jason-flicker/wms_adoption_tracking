@@ -1,4 +1,5 @@
 wms_session.json
+wms_profile/
 *.png
 ~$*
 __pycache__/
