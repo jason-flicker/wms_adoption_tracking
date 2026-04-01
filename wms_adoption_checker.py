@@ -58,7 +58,10 @@ OUTPUT_FILE  = str(Path(__file__).parent / "wms_adoption_results.xlsx")
 
 def _is_login_page(url: str) -> bool:
     u = url.lower()
-    return "login" in u or "sso" in u or "accounts.google" in u or u == "" or u == "about:blank"
+    # /v2/google/login is the WMS OAuth callback — not a login prompt, so exclude it
+    if "wms.ssc.shopee.ph" in u:
+        return False
+    return "login" in u or "sso" in u or "accounts.google" in u or u in ("", "about:blank")
 
 
 async def wait_for_login(page, context, target_url: str, session_file: str):
@@ -150,10 +153,20 @@ async def run():
     results = []
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
+        # Use real Chrome (not bundled Chromium) so Google OAuth works correctly.
+        # Falls back to bundled Chromium if Chrome is not installed.
+        try:
+            browser = await p.chromium.launch(
+                channel="chrome",
+                headless=False,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+        except Exception:
+            print("⚠️  Real Chrome not found, falling back to Chromium (Google login may fail).")
+            browser = await p.chromium.launch(
+                headless=False,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
 
         if Path(SESSION_FILE).exists():
             print(f"Reusing saved session from {SESSION_FILE}")
