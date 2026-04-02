@@ -141,6 +141,10 @@ async def _navigate_and_switch_warehouse(page, url: str, market: str, whs: str):
     await page.goto(url, wait_until="networkidle", timeout=30000)
     await page.wait_for_timeout(800)
 
+    # If the goto redirected to a login page, wait for the user to log in
+    if _is_login_page(page.url):
+        await _ensure_logged_in(page, url, f"{market} WMS")
+
     # Open trigger
     trigger_ok = await page.evaluate("""() => {
         const el = Array.from(document.querySelectorAll('*')).find(e =>
@@ -190,13 +194,40 @@ def _is_login_page(url: str) -> bool:
     return "login" in u or "sso" in u or "accounts.google" in u
 
 
+async def _wait_for_wms_app(page, timeout_s: int = 120):
+    """
+    Poll until a WMS UI element is visible (warehouse selector or sidebar).
+    This is more reliable than checking the URL because the post-OAuth redirect
+    can land on the WMS page without the URL passing _is_login_page().
+    """
+    import time
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            found = await page.evaluate("""() =>
+                document.querySelector('.ssc-select, [class*="ssc-select"]') !== null
+                || document.querySelector('.ant-layout-sider') !== null
+            """)
+            if found:
+                return
+        except Exception:
+            pass
+        await asyncio.sleep(1)
+    raise TimeoutError("WMS app did not load — login may not have completed")
+
+
 async def _ensure_logged_in(page, url: str, label: str = ""):
+    """Navigate to url; if redirected to login, wait for the user to log in."""
     await page.goto(url, wait_until="networkidle", timeout=30000)
-    if _is_login_page(page.url):
-        msg = f"Login required — {label}. " if label else "Login required. "
-        print(f"\n⚠️  {msg}Log in, then press Enter.")
-        input()
-        await page.goto(url, wait_until="networkidle", timeout=30000)
+    if not _is_login_page(page.url):
+        return
+    print(f"\n{'='*60}")
+    print(f"⚠️  Login required — {label or url}")
+    print("  Complete Google SSO in the browser window.")
+    print("  (The script will continue automatically once WMS loads.)")
+    print(f"{'='*60}")
+    await _wait_for_wms_app(page)
+    print("  ✓ Login detected — continuing.")
 
 
 # ─── MAIN RUN LOOP ────────────────────────────────────────────────────────────
@@ -225,19 +256,47 @@ async def run():
         page = await context.new_page()
         await page.route("**/*", _guard)
 
-        # First-run: manual login for all portals
+        # First-run: visit every required WMS market + admin portal
+        # so the user can log in to all of them before the run starts.
+        needed_markets = {m for f in FEATURES for m in f["markets"]}
+        needs_admin    = any(
+            getattr(checkers.get(f["feature"]), "CHECK_TYPE", "") == "admin_portal"
+            for f in FEATURES
+        )
+
         if is_first_run:
             print("\n" + "=" * 60)
-            print("FIRST RUN — manual login required for all portals")
+            print("FIRST RUN — log in to every required portal")
             print("=" * 60)
-            await page.goto(WMS_BASE_URLS["PH"], wait_until="networkidle", timeout=30000)
-            print("  1. Complete Google SSO login in the WMS browser window.")
-            print("  2. Navigate to https://ops.ssc.shopeemobile.com and log in there too.")
-            print("\nPress Enter once both portals are logged in.")
-            input()
-            print("Profile saved.\n")
-        else:
-            print(f"\nProfile: {PROFILE_DIR}\n")
+
+        for market in sorted(needed_markets):
+            if market not in WMS_BASE_URLS:
+                continue
+            url = WMS_BASE_URLS[market]
+            await page.goto(url, wait_until="networkidle", timeout=30000)
+            if _is_login_page(page.url):
+                print(f"\n  🔐 {market} WMS needs login ({url})")
+                await _wait_for_wms_app(page)
+                print(f"  ✓  {market} WMS — logged in")
+            else:
+                print(f"  ✓  {market} WMS — session OK")
+
+        if needs_admin:
+            admin_url = "https://ops.ssc.shopeemobile.com"
+            await page.goto(admin_url, wait_until="networkidle", timeout=30000)
+            if _is_login_page(page.url):
+                print(f"\n  🔐 Admin portal needs login ({admin_url})")
+                print("  Complete login in browser, then the script continues automatically.")
+                # Admin portal may not have .ssc-select; wait for URL to leave login
+                for _ in range(120):
+                    if not _is_login_page(page.url):
+                        break
+                    await asyncio.sleep(1)
+                print("  ✓  Admin portal — logged in")
+            else:
+                print("  ✓  Admin portal — session OK")
+
+        print(f"\nProfile: {PROFILE_DIR}\n")
 
         # Auto-discover warehouses for markets without a hardcoded list
         needed_markets = {m for f in FEATURES for m in f["markets"]}
@@ -277,15 +336,20 @@ async def run():
                 print(f"  Market  : {market}  ({len(warehouses)} warehouses)  [{check_type}]")
                 print(f"{'─'*58}")
 
+                # Pre-flight: ensure the market portal is accessible before looping
+                if check_type == "wms_frontend" and market in WMS_BASE_URLS:
+                    base = WMS_BASE_URLS[market]
+                    await page.goto(base, wait_until="networkidle", timeout=30000)
+                    if _is_login_page(page.url):
+                        print(f"\n  🔐 {market} WMS session expired — please log in.")
+                        await _wait_for_wms_app(page)
+
                 for i, whs in enumerate(warehouses):
                     try:
                         print(f"  [{i+1:2d}/{len(warehouses)}] {whs:10s}", end=" ", flush=True)
 
                         # Runner owns navigation for wms_frontend only
                         if check_type == "wms_frontend":
-                            if _is_login_page(page.url):
-                                print("\n⚠️  Session expired. Log in, then press Enter.")
-                                input()
                             url = WMS_BASE_URLS[market] + params["url_path"]
                             await _navigate_and_switch_warehouse(page, url, market, whs)
 
