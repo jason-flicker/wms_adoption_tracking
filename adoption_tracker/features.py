@@ -20,18 +20,59 @@ See each checker file for the params it expects.
 
 MARKETS = {
     "PH": [
-        "PHA", "PHB", "PHD", "PHE", "PHG", "PHIXC", "PHIXP",
-        "PHJ", "PHK", "PHL", "PHM", "PHN", "PHO", "PHP",
-        "PHR", "PHS", "PHT", "PHTSDS", "PHU", "PHV", "PHX", "PHY",
+        "PHA", "PHB", "PHD", "PHE"
     ],
-    "SG": [],   # auto-discovered
-    "MY": [],   # auto-discovered
+    "SG": [
+        "SGL","SGC"
+    ],   # auto-discovered
+    "MY": [
+        "MYK","MYS","MYE","MYX"
+    ],   # auto-discovered
 }
 
 # ─── FEATURES ────────────────────────────────────────────────────────────────
 
 FEATURES = [
 
+# ── admin_portal ─────────────────────────────────────────────────────────
+
+    {
+        "feature": "Inbound Boxing",
+        "markets": ["SG", "MY"],
+        "params": {
+            "checks": [
+                {
+                    "url":          "https://ops.ssc.shopeemobile.com/wms/configurationmanagement/configuration/view?conf_key=Non_QC_Item_Putaway_Directly",
+                    "key":          "Non_QC_Item_Putaway_Directly",
+                    "target_value": "1",
+                }
+            ],
+        },
+    },
+
+    {
+        "feature": "Dynamic Wave Toggle",
+        "markets": ["SG", "MY"],
+        "params": {
+            "checks": [
+                {
+                    "url":          "https://ops.ssc.shopeemobile.com/wms/configurationmanagement/configuration/view?conf_key=wave_dynamic_wave_task_enable",
+                    "key":          "wave_dynamic_wave_task_enable",
+                    "target_value": "1",
+                },
+                {
+                    "url":          "https://ops.ssc.shopeemobile.com/wms/configurationmanagement/configuration/view?conf_key=wave_algorithm_switch",
+                    "key":          "wave_algorithm_switch",
+                    "target_value": "1",
+                },
+                {
+                    "url":          "https://ops.ssc.shopeemobile.com/wms/configurationmanagement/configuration/view?conf_key=pre_allocate_zone_inventory",
+                    "key":          "pre_allocate_zone_inventory",
+                    "target_value": "1",
+                },
+            ],
+        },
+    },
     # ── wms_frontend ─────────────────────────────────────────────────────────
 
     {
@@ -81,43 +122,4 @@ FEATURES = [
         },
     },
 
-    # ── admin_portal ─────────────────────────────────────────────────────────
-
-    {
-        "feature": "Inbound Boxing",
-        "markets": ["SG", "MY"],
-        "params": {
-            "checks": [
-                {
-                    "url":          "https://ops.ssc.shopeemobile.com/wms/configurationmanagement/configuration/view?conf_key=Non_QC_Item_Putaway_Directly",
-                    "key":          "Non_QC_Item_Putaway_Directly",
-                    "target_value": "1",
-                }
-            ],
-        },
-    },
-
-    {
-        "feature": "Dynamic Wave Toggle",
-        "markets": ["SG", "MY"],
-        "params": {
-            "checks": [
-                {
-                    "url":          "https://ops.ssc.shopeemobile.com/wms/configurationmanagement/configuration/view?conf_key=wave_dynamic_wave_task_enable",
-                    "key":          "wave_dynamic_wave_task_enable",
-                    "target_value": "1",
-                },
-                {
-                    "url":          "https://ops.ssc.shopeemobile.com/wms/configurationmanagement/configuration/view?conf_key=wave_algorithm_switch",
-                    "key":          "wave_algorithm_switch",
-                    "target_value": "1",
-                },
-                {
-                    "url":          "https://ops.ssc.shopeemobile.com/wms/configurationmanagement/configuration/view?conf_key=pre_allocate_zone_inventory",
-                    "key":          "pre_allocate_zone_inventory",
-                    "target_value": "1",
-                },
-            ],
-        },
-    },
 ]
