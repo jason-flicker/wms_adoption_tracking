@@ -29,45 +29,37 @@ async def check(page, warehouse: str, market: str, params: dict) -> tuple:
         await page.wait_for_load_state("networkidle", timeout=15000)
 
         # ── Step 1: open the Picking Method dropdown ──────────────────────
-        # Label and dropdown may be siblings in a grid layout (not nested),
-        # so walking up the DOM won't find the select from inside the label.
-        # Instead: find the .ant-select-selector whose bounding box sits on
-        # the same horizontal row and immediately to the right of the label.
-        clicked = await page.evaluate("""() => {
-            // Find the visible label — allow child elements (tooltip icons etc.)
-            const label = Array.from(document.querySelectorAll('*')).find(el =>
-                el.offsetParent !== null &&
-                /^Picking Met/i.test((el.innerText || '').trim()) &&
-                el.getBoundingClientRect().width < 300
-            );
-            if (!label) return {ok: false, msg: 'Picking Method label not found'};
+        # Strategy: click each .ant-select-selector on the page one by one
+        # and check whether the 'Sorting While Picking' option appears.
+        # This avoids any label-lookup or geometry assumptions.
+        selectors = await page.query_selector_all('.ant-select-selector')
+        clicked = False
+        for sel in selectors:
+            try:
+                await sel.click()
+                await page.wait_for_timeout(350)
+                opt = await page.query_selector(
+                    '.ant-select-item-option-content'
+                )
+                if opt:
+                    opts_text = await page.evaluate("""() =>
+                        Array.from(document.querySelectorAll(
+                            '.ant-select-item-option-content'
+                        )).map(e => e.innerText.trim())
+                    """)
+                    if 'Sorting While Picking' in opts_text:
+                        clicked = True
+                        break
+                # Not the right dropdown — close it
+                await page.keyboard.press('Escape')
+                await page.wait_for_timeout(200)
+            except Exception:
+                continue
 
-            const lRect = label.getBoundingClientRect();
+        if not clicked:
+            return "picking_method_dropdown_not_found", None
 
-            // Among all visible .ant-select-selector elements, pick the one
-            // that is on the same row (vertically overlapping) and closest to
-            // the right edge of the label.
-            const selectors = Array.from(
-                document.querySelectorAll('.ant-select-selector')
-            );
-            let best = null, bestDist = Infinity;
-            for (const sel of selectors) {
-                const r = sel.getBoundingClientRect();
-                const sameRow = r.top <= lRect.bottom + 8 && r.bottom >= lRect.top - 8;
-                const toRight = r.left >= lRect.right - 4;
-                if (!sameRow || !toRight) continue;
-                const dist = r.left - lRect.right;
-                if (dist < bestDist) { bestDist = dist; best = sel; }
-            }
-            if (!best) return {ok: false, msg: 'no ant-select-selector found on same row to the right'};
-            best.click();
-            return {ok: true, dist: bestDist};
-        }""")
-
-        if not clicked.get("ok"):
-            return f"filter_open_failed: {clicked.get('msg')}", None
-
-        await page.wait_for_timeout(500)
+        await page.wait_for_timeout(300)
 
         # ── Step 2: select "Sorting While Picking" ────────────────────────
         selected = await page.evaluate("""() => {
