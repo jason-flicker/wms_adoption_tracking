@@ -5,14 +5,17 @@ Path : /rulecenter/skillManagementRule/operatorSkill/salesOutbound/picking
 Adopted if the number of users with Picking Method = "Sorting While Picking"
 is >= min_count (default 5).
 
-DOM structure (confirmed via DevTools inspection):
-  - Filter label : SPAN.ssc-form-item-label  (text "Picking Meth...")
-                    └─ parent: SPAN.tooltip
-                        └─ parent: container that holds .ssc-select
-  - Dropdown trigger : [class*="ssc-select"]  (2 levels up from label)
+DOM structure (confirmed via DevTools on wms.ssc.shopee.sg):
+  - Filter label : SPAN.ssc-form-item-label  "Picking Meth..."
+                     parent: SPAN.tooltip
+                       parent: container with [class*="ssc-select"]  (i=1)
   - Dropdown options : DIV.ssc-table-header-column-container
-  - Search button    : <button> with innerText "Search"
-  - Total counter    : leaf element whose text matches /^Total: [\d,]+/
+  - Search button    : <button> innerText "Search"
+  - Total counter    : leaf text matching /^Total: [\d,]+/
+
+Known pitfall: after previous warehouse check a toast/notification ssc-select
+may be open (shows "Success/Download/Failed"). We dismiss all overlays first
+and verify the correct options appear before proceeding.
 """
 
 import re
@@ -28,9 +31,22 @@ async def check(page, warehouse: str, market: str, params: dict) -> tuple:
     try:
         await page.wait_for_load_state("networkidle", timeout=15000)
 
-        # ── Step 1: open the Picking Method ssc-select dropdown ───────────
-        # label.parentElement = SPAN.tooltip
-        # label.parentElement.parentElement = container with .ssc-select (i=1)
+        # ── Step 0: dismiss any open overlays / toast notifications ───────
+        # After a previous warehouse check a toast dropdown may still be open.
+        await page.evaluate("""() => {
+            // Click body to close any open dropdowns
+            document.body.click();
+            // Remove toast / notification elements
+            document.querySelectorAll(
+                '[class*="ssc-notification"], [class*="notification-notice"], ' +
+                '[class*="ssc-message"], [class*="ssc-toast"]'
+            ).forEach(el => el.remove());
+        }""")
+        await page.wait_for_timeout(400)
+
+        # ── Step 1: open the Picking Method ssc-select ────────────────────
+        # Walk up 2 levels from label to its form-item container, then click
+        # the ssc-select inside that container (not a global querySelector).
         clicked = await page.evaluate("""() => {
             const label = Array.from(
                 document.querySelectorAll('.ssc-form-item-label')
@@ -38,12 +54,12 @@ async def check(page, warehouse: str, market: str, params: dict) -> tuple:
 
             if (!label) return {ok: false, msg: 'ssc-form-item-label not found'};
 
-            // Walk up 2 levels (label → tooltip → container)
+            // label → SPAN.tooltip → form-item container (i=1 from inspection)
             const container = label.parentElement?.parentElement;
             if (!container) return {ok: false, msg: 'container not found'};
 
             const sel = container.querySelector('[class*="ssc-select"]');
-            if (!sel) return {ok: false, msg: 'ssc-select not found in container'};
+            if (!sel) return {ok: false, msg: 'ssc-select not in container'};
 
             sel.click();
             return {ok: true};
@@ -54,8 +70,22 @@ async def check(page, warehouse: str, market: str, params: dict) -> tuple:
 
         await page.wait_for_timeout(400)
 
+        # ── Step 1b: verify correct options appeared ───────────────────────
+        # If a notification dropdown opened instead, options will be
+        # "Success/Download/Failed". Check for expected picking options.
+        opts_check = await page.evaluate("""() => {
+            const opts = Array.from(document.querySelectorAll(
+                '.ssc-table-header-column-container'
+            )).map(el => (el.innerText || '').trim());
+            return opts;
+        }""")
+
+        if 'Sorting While Picking' not in opts_check and 'Batch Picking' not in opts_check:
+            # Wrong dropdown opened — close it and report
+            await page.keyboard.press('Escape')
+            return f"wrong_dropdown_options: {opts_check[:6]}", None
+
         # ── Step 2: click "Sorting While Picking" option ──────────────────
-        # Options render as DIV.ssc-table-header-column-container
         selected = await page.evaluate("""() => {
             const opts = Array.from(document.querySelectorAll(
                 '.ssc-table-header-column-container'
@@ -64,10 +94,8 @@ async def check(page, warehouse: str, market: str, params: dict) -> tuple:
                 el => (el.innerText || '').trim() === 'Sorting While Picking'
             );
             if (!target) {
-                return {
-                    ok: false,
-                    available: opts.map(e => e.innerText.trim()).slice(0, 8)
-                };
+                return {ok: false,
+                        available: opts.map(e => e.innerText.trim()).slice(0, 6)};
             }
             target.click();
             return {ok: true};
@@ -78,7 +106,7 @@ async def check(page, warehouse: str, market: str, params: dict) -> tuple:
 
         await page.wait_for_timeout(300)
 
-        # ── Step 3: click the Search button ──────────────────────────────
+        # ── Step 3: click Search ──────────────────────────────────────────
         clicked_search = await page.evaluate("""() => {
             const btn = Array.from(
                 document.querySelectorAll('button, [class*="ssc-btn"]')
@@ -94,7 +122,7 @@ async def check(page, warehouse: str, market: str, params: dict) -> tuple:
         await page.wait_for_load_state("networkidle", timeout=20000)
         await page.wait_for_timeout(1000)
 
-        # ── Step 4: read Total: X from table footer ───────────────────────
+        # ── Step 4: read Total: X ─────────────────────────────────────────
         total_text = await page.evaluate("""() => {
             const el = Array.from(document.querySelectorAll('*')).find(e =>
                 e.offsetParent !== null &&
