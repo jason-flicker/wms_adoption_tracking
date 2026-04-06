@@ -5,14 +5,14 @@ Path : /rulecenter/skillManagementRule/operatorSkill/salesOutbound/picking
 Adopted if the number of users with Picking Method = "Sorting While Picking"
 is >= min_count (default 5).
 
-Page flow
----------
-1. Find the "Picking Method" filter label, click its adjacent Ant Design
-   dropdown to open it.
-2. Click the "Sorting While Picking" option.
-3. Click the red "Search" button.
-4. Read the "Total: X" counter at the bottom-left of the result table.
-5. Adopted = (X >= min_count).
+DOM structure (confirmed via DevTools inspection):
+  - Filter label : SPAN.ssc-form-item-label  (text "Picking Meth...")
+                    └─ parent: SPAN.tooltip
+                        └─ parent: container that holds .ssc-select
+  - Dropdown trigger : [class*="ssc-select"]  (2 levels up from label)
+  - Dropdown options : DIV.ssc-table-header-column-container
+  - Search button    : <button> with innerText "Search"
+  - Total counter    : leaf element whose text matches /^Total: [\d,]+/
 """
 
 import re
@@ -28,51 +28,45 @@ async def check(page, warehouse: str, market: str, params: dict) -> tuple:
     try:
         await page.wait_for_load_state("networkidle", timeout=15000)
 
-        # ── Step 1: open the Picking Method dropdown ──────────────────────
-        # Strategy: click each .ant-select-selector on the page one by one
-        # and check whether the 'Sorting While Picking' option appears.
-        # This avoids any label-lookup or geometry assumptions.
-        selectors = await page.query_selector_all('.ant-select-selector')
-        clicked = False
-        for sel in selectors:
-            try:
-                await sel.click()
-                await page.wait_for_timeout(350)
-                opt = await page.query_selector(
-                    '.ant-select-item-option-content'
-                )
-                if opt:
-                    opts_text = await page.evaluate("""() =>
-                        Array.from(document.querySelectorAll(
-                            '.ant-select-item-option-content'
-                        )).map(e => e.innerText.trim())
-                    """)
-                    if 'Sorting While Picking' in opts_text:
-                        clicked = True
-                        break
-                # Not the right dropdown — close it
-                await page.keyboard.press('Escape')
-                await page.wait_for_timeout(200)
-            except Exception:
-                continue
+        # ── Step 1: open the Picking Method ssc-select dropdown ───────────
+        # label.parentElement = SPAN.tooltip
+        # label.parentElement.parentElement = container with .ssc-select (i=1)
+        clicked = await page.evaluate("""() => {
+            const label = Array.from(
+                document.querySelectorAll('.ssc-form-item-label')
+            ).find(el => /Picking Met/i.test((el.innerText || '').trim()));
 
-        if not clicked:
-            return "picking_method_dropdown_not_found", None
+            if (!label) return {ok: false, msg: 'ssc-form-item-label not found'};
 
-        await page.wait_for_timeout(300)
+            // Walk up 2 levels (label → tooltip → container)
+            const container = label.parentElement?.parentElement;
+            if (!container) return {ok: false, msg: 'container not found'};
 
-        # ── Step 2: select "Sorting While Picking" ────────────────────────
+            const sel = container.querySelector('[class*="ssc-select"]');
+            if (!sel) return {ok: false, msg: 'ssc-select not found in container'};
+
+            sel.click();
+            return {ok: true};
+        }""")
+
+        if not clicked.get("ok"):
+            return f"filter_open_failed: {clicked.get('msg')}", None
+
+        await page.wait_for_timeout(400)
+
+        # ── Step 2: click "Sorting While Picking" option ──────────────────
+        # Options render as DIV.ssc-table-header-column-container
         selected = await page.evaluate("""() => {
             const opts = Array.from(document.querySelectorAll(
-                '.ant-select-item-option-content'
+                '.ssc-table-header-column-container'
             ));
-            const target = opts.find(el =>
-                (el.innerText || '').trim() === 'Sorting While Picking'
+            const target = opts.find(
+                el => (el.innerText || '').trim() === 'Sorting While Picking'
             );
             if (!target) {
                 return {
                     ok: false,
-                    available: opts.map(e => e.innerText.trim())
+                    available: opts.map(e => e.innerText.trim()).slice(0, 8)
                 };
             }
             target.click();
@@ -80,18 +74,15 @@ async def check(page, warehouse: str, market: str, params: dict) -> tuple:
         }""")
 
         if not selected.get("ok"):
-            return (
-                f"option_not_found (available: {selected.get('available')})",
-                None,
-            )
+            return f"option_not_found: {selected.get('available')}", None
 
         await page.wait_for_timeout(300)
 
-        # ── Step 3: click Search ──────────────────────────────────────────
+        # ── Step 3: click the Search button ──────────────────────────────
         clicked_search = await page.evaluate("""() => {
-            const btn = Array.from(document.querySelectorAll('button')).find(
-                b => (b.innerText || '').trim() === 'Search'
-            );
+            const btn = Array.from(
+                document.querySelectorAll('button, [class*="ssc-btn"]')
+            ).find(b => (b.innerText || '').trim() === 'Search');
             if (!btn) return false;
             btn.click();
             return true;
@@ -103,7 +94,7 @@ async def check(page, warehouse: str, market: str, params: dict) -> tuple:
         await page.wait_for_load_state("networkidle", timeout=20000)
         await page.wait_for_timeout(1000)
 
-        # ── Step 4: read Total: X from the table footer ───────────────────
+        # ── Step 4: read Total: X from table footer ───────────────────────
         total_text = await page.evaluate("""() => {
             const el = Array.from(document.querySelectorAll('*')).find(e =>
                 e.offsetParent !== null &&
