@@ -5,17 +5,15 @@ Path : /rulecenter/skillManagementRule/operatorSkill/salesOutbound/picking
 Adopted if the number of users with Picking Method = "Sorting While Picking"
 is >= min_count (default 5).
 
-DOM structure (confirmed via DevTools on wms.ssc.shopee.sg):
+DOM notes (confirmed via DevTools on wms.ssc.shopee.sg):
   - Filter label : SPAN.ssc-form-item-label  "Picking Meth..."
-                     parent: SPAN.tooltip
-                       parent: container with [class*="ssc-select"]  (i=1)
-  - Dropdown options : DIV.ssc-table-header-column-container
-  - Search button    : <button> innerText "Search"
-  - Total counter    : leaf text matching /^Total: [\d,]+/
-
-Known pitfall: after previous warehouse check a toast/notification ssc-select
-may be open (shows "Success/Download/Failed"). We dismiss all overlays first
-and verify the correct options appear before proceeding.
+                     └─ SPAN.tooltip
+                         └─ form container (holds [class*="ssc-select"])
+  - Dropdown options: .ssc-option elements — dynamically added to DOM only
+    when the dropdown is open, then removed on close.
+    ⚠️  NOT .ssc-table-header-column-container (those are pre-rendered and
+    shared with table column headers; count stays 260 before/after clicking).
+  - Option text to click: exactly "Sorting While Picking" (class: ssc-option)
 """
 
 import re
@@ -31,22 +29,23 @@ async def check(page, warehouse: str, market: str, params: dict) -> tuple:
     try:
         await page.wait_for_load_state("networkidle", timeout=15000)
 
-        # ── Step 0: dismiss any open overlays / toast notifications ───────
-        # After a previous warehouse check a toast dropdown may still be open.
+        # ── Step 0: close any open dropdowns via Escape ───────────────────
+        # Do NOT use document.body.click() — it can accidentally open
+        # notification dropdowns. Escape is safe and closes all overlays.
+        for _ in range(3):
+            await page.keyboard.press('Escape')
+            await page.wait_for_timeout(150)
+
+        # Remove any toast/notification elements
         await page.evaluate("""() => {
-            // Click body to close any open dropdowns
-            document.body.click();
-            // Remove toast / notification elements
             document.querySelectorAll(
-                '[class*="ssc-notification"], [class*="notification-notice"], ' +
+                '[class*="ssc-notification"], [class*="notification-notice"],' +
                 '[class*="ssc-message"], [class*="ssc-toast"]'
             ).forEach(el => el.remove());
         }""")
-        await page.wait_for_timeout(400)
+        await page.wait_for_timeout(300)
 
-        # ── Step 1: open the Picking Method ssc-select ────────────────────
-        # Walk up 2 levels from label to its form-item container, then click
-        # the ssc-select inside that container (not a global querySelector).
+        # ── Step 1: click the Picking Method ssc-select ───────────────────
         clicked = await page.evaluate("""() => {
             const label = Array.from(
                 document.querySelectorAll('.ssc-form-item-label')
@@ -54,9 +53,9 @@ async def check(page, warehouse: str, market: str, params: dict) -> tuple:
 
             if (!label) return {ok: false, msg: 'ssc-form-item-label not found'};
 
-            // label → SPAN.tooltip → form-item container (i=1 from inspection)
+            // label → SPAN.tooltip → form container
             const container = label.parentElement?.parentElement;
-            if (!container) return {ok: false, msg: 'container not found'};
+            if (!container) return {ok: false, msg: 'container missing'};
 
             const sel = container.querySelector('[class*="ssc-select"]');
             if (!sel) return {ok: false, msg: 'ssc-select not in container'};
@@ -68,49 +67,40 @@ async def check(page, warehouse: str, market: str, params: dict) -> tuple:
         if not clicked.get("ok"):
             return f"filter_open_failed: {clicked.get('msg')}", None
 
-        await page.wait_for_timeout(400)
+        await page.wait_for_timeout(600)
 
-        # ── Step 1b: verify correct options appeared ───────────────────────
-        # If a notification dropdown opened instead, options will be
-        # "Success/Download/Failed". Check for expected picking options.
-        opts_check = await page.evaluate("""() => {
-            const opts = Array.from(document.querySelectorAll(
-                '.ssc-table-header-column-container'
-            )).map(el => (el.innerText || '').trim());
-            return opts;
-        }""")
-
-        if 'Sorting While Picking' not in opts_check and 'Batch Picking' not in opts_check:
-            # Wrong dropdown opened — close it and report
-            await page.keyboard.press('Escape')
-            return f"wrong_dropdown_options: {opts_check[:6]}", None
-
-        # ── Step 2: click "Sorting While Picking" option ──────────────────
+        # ── Step 2: click the "Sorting While Picking" ssc-option ──────────
+        # .ssc-option elements are dynamically injected when a dropdown opens
+        # and removed when it closes — no snapshot needed.
         selected = await page.evaluate("""() => {
-            const opts = Array.from(document.querySelectorAll(
-                '.ssc-table-header-column-container'
-            ));
+            const opts = Array.from(document.querySelectorAll('.ssc-option'));
             const target = opts.find(
                 el => (el.innerText || '').trim() === 'Sorting While Picking'
             );
             if (!target) {
-                return {ok: false,
-                        available: opts.map(e => e.innerText.trim()).slice(0, 6)};
+                return {
+                    ok: false,
+                    optCount: opts.length,
+                    texts: opts.map(e => e.innerText.trim()).slice(0, 10),
+                };
             }
             target.click();
             return {ok: true};
         }""")
 
         if not selected.get("ok"):
-            return f"option_not_found: {selected.get('available')}", None
+            opt_count = selected.get("optCount", 0)
+            texts     = selected.get("texts", [])
+            if opt_count == 0:
+                return "dropdown_did_not_open", None
+            return f"option_not_found (opts={opt_count} {texts})", None
 
         await page.wait_for_timeout(300)
 
         # ── Step 3: click Search ──────────────────────────────────────────
         clicked_search = await page.evaluate("""() => {
-            const btn = Array.from(
-                document.querySelectorAll('button, [class*="ssc-btn"]')
-            ).find(b => (b.innerText || '').trim() === 'Search');
+            const btn = Array.from(document.querySelectorAll('button'))
+                .find(b => (b.innerText || '').trim() === 'Search');
             if (!btn) return false;
             btn.click();
             return true;
@@ -122,7 +112,7 @@ async def check(page, warehouse: str, market: str, params: dict) -> tuple:
         await page.wait_for_load_state("networkidle", timeout=20000)
         await page.wait_for_timeout(1000)
 
-        # ── Step 4: read Total: X ─────────────────────────────────────────
+        # ── Step 4: read Total: X from table footer ───────────────────────
         total_text = await page.evaluate("""() => {
             const el = Array.from(document.querySelectorAll('*')).find(e =>
                 e.offsetParent !== null &&

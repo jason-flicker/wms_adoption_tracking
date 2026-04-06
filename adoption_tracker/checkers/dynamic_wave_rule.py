@@ -1,27 +1,55 @@
 """
 Checker: Dynamic Wave Rule Setting
-Adopted if at least 1 rule row has status = Active in the Dynamic Wave Rule table.
+Path  : /rulecenter/waverule/dynamicWaveRule
+
+DOM notes:
+  - Table uses ssc-react-rc-table-cell (NOT ant-table-cell)
+  - Status column (td index 4) holds a toggle switch
+  - Active   : <span class="ssc-react-switch-wrapper ssc-react-switch-wrapper-checked">
+                 <input value="1">
+  - Inactive : <span class="ssc-react-switch-wrapper">   (no -checked suffix)
+                 <input value="0">
+  - No data  : table has only 1 row (header placeholder row)
+  Signal: at least 1 rule row whose toggle has class ssc-react-switch-wrapper-checked
 """
 
 FEATURE_NAME = "Dynamic Wave Rule Setting"
 CHECK_TYPE   = "wms_frontend"
-SIGNAL       = "At least 1 active rule in Dynamic Wave Rule table"
+SIGNAL       = "At least 1 active (toggled-on) rule in Dynamic Wave Rule table"
 
 
 async def check(page, warehouse: str, market: str, params: dict) -> tuple:
     try:
         await page.wait_for_load_state("networkidle", timeout=15000)
+
         result = await page.evaluate("""() => {
-            const cells = Array.from(document.querySelectorAll(
-                'td, .ant-table-cell, [class*="table-cell"]'
-            ));
-            const active = cells.find(el => /^active$/i.test((el.innerText||'').trim()));
-            return {found: !!active, total_cells: cells.length};
+            // Count data rows (skip row1 which is a hidden placeholder row)
+            const rows = Array.from(document.querySelectorAll('tr'));
+            const dataRows = rows.filter(r => {
+                const cells = r.querySelectorAll('td');
+                // A real data row has td1 with a numeric priority value
+                return cells.length > 1 && /^\d+$/.test((cells[1]?.innerText || '').trim());
+            });
+
+            // Check for at least one active toggle
+            const activeToggles = document.querySelectorAll(
+                '.ssc-react-switch-wrapper-checked'
+            );
+
+            return {
+                dataRowCount: dataRows.length,
+                activeCount: activeToggles.length,
+            };
         }""")
-        if result["total_cells"] == 0:
-            return "page_no_table", None
-        if result["found"]:
-            return "active_rule_found", True
-        return "no_active_rule", False
+
+        data_rows   = result["dataRowCount"]
+        active_count = result["activeCount"]
+
+        if data_rows == 0:
+            return "no_rules_configured", False
+        if active_count > 0:
+            return f"{active_count}_active_rules_of_{data_rows}", True
+        return f"0_active_rules_of_{data_rows}", False
+
     except Exception as e:
         return f"error: {e}", None

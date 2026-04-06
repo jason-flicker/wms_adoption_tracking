@@ -1,40 +1,44 @@
 """
-Checker: Dynamic Replenishment
-Path : /inventorymanage/racktransfer/order
+Checker: Basic Inbound Operation
+Path : /inbound/order
 
-Adopted if any rack transfer orders with:
-  - Source From = "Replenishment Demand Pool"
-  - Create Time within the last N days (default 7)
-exist (total > 0 after both filters).
+Adopted if the inbound ASN table has at least 1 row after filtering
+Actual Arrive time to the last N days (default 7).
 
-DOM notes (same SSC component library as picking_while_sorting):
-  - Filter options: .ssc-option — dynamically injected when dropdown opens.
-  - Create Time range picker: [data-for="create_time_gt+create_time_lt"]
-    Contains two <input type="input"> — Start Date and End Date.
-    Format: YYYY/MM/DD HH:mm:ss
-    Use triple_click + type to set (Playwright fill + Tab to confirm).
+Steps:
+  1. Set Actual Arrive time range to [today-N, today]
+     (filter is visible by default — no "More" button needed)
+  2. Click Search
+  3. Check Total > 0
+
+DOM notes:
+  - "More" button must be clicked first to expand the filter grid.
+  - Date picker: no data-for attribute — scoped via .ssc-form-item-label
+    matching "Actual Arriv" → xpath ../.. → two <input> elements.
+  - Use click(click_count=3) + type() to set dates (triggers Vue reactivity).
+    Do NOT use native HTMLInputElement setter — it does not commit to the
+    Vue date picker component.
+  - Total counter: "X Order(s) Selected" text OR leaf /^Total:\s*[\d,]+/
 """
 
 import re
 import datetime
 
-FEATURE_NAME = "Dynamic Replenishment"
+FEATURE_NAME = "Basic Inbound Operation"
 CHECK_TYPE   = "wms_frontend"
-SIGNAL       = "Any orders with Source From = Replenishment Demand Pool in last 7 days"
+SIGNAL       = "At least 1 ASN with Actual Arrive time in the last 7 days"
 
 
 async def check(page, warehouse: str, market: str, params: dict) -> tuple:
-    filter_value = params.get("filter_value", "Replenishment Demand Pool")
-    days         = int(params.get("days", 7))
+    days = int(params.get("days", 7))
 
     try:
         await page.wait_for_load_state("networkidle", timeout=15000)
 
-        # ── Step 0: close any open dropdowns via Escape ───────────────────
+        # ── Step 0: close dropdowns, remove toasts ────────────────────────
         for _ in range(3):
             await page.keyboard.press('Escape')
             await page.wait_for_timeout(150)
-
         await page.evaluate("""() => {
             document.querySelectorAll(
                 '[class*="ssc-notification"], [class*="notification-notice"],' +
@@ -43,65 +47,48 @@ async def check(page, warehouse: str, market: str, params: dict) -> tuple:
         }""")
         await page.wait_for_timeout(300)
 
-        # ── Step 1: Source From → Replenishment Demand Pool ───────────────
-        clicked = await page.evaluate("""() => {
-            const label = Array.from(
-                document.querySelectorAll('.ssc-form-item-label')
-            ).find(el => /Source from/i.test((el.innerText || '').trim()));
-
-            if (!label) return {ok: false, msg: 'Source from label not found'};
-
-            const container = label.parentElement?.parentElement;
-            if (!container) return {ok: false, msg: 'container missing'};
-
-            const sel = container.querySelector('[class*="ssc-select"]');
-            if (!sel) return {ok: false, msg: 'ssc-select not in container'};
-
-            sel.click();
+        # ── Step 1: click "More" to expand filter grid ───────────────────
+        clicked_more = await page.evaluate("""() => {
+            const btn = Array.from(document.querySelectorAll('button')).find(
+                b => /^More$/i.test((b.innerText || '').trim())
+            );
+            if (!btn) return {ok: false, msg: 'More button not found'};
+            btn.click();
             return {ok: true};
         }""")
+        if not clicked_more.get("ok"):
+            return f"more_button_not_found: {clicked_more.get('msg')}", None
+        await page.wait_for_timeout(500)
 
-        if not clicked.get("ok"):
-            return f"filter_open_failed: {clicked.get('msg')}", None
-
-        await page.wait_for_timeout(600)
-
-        selected = await page.evaluate(f"""() => {{
-            const opts = Array.from(document.querySelectorAll('.ssc-option'));
-            const target = opts.find(
-                el => (el.innerText || '').trim() === {repr(filter_value)}
-            );
-            if (!target) {{
-                return {{
-                    ok: false,
-                    optCount: opts.length,
-                    texts: opts.map(e => e.innerText.trim()).slice(0, 10),
-                }};
-            }}
-            target.click();
-            return {{ok: true}};
-        }}""")
-
-        if not selected.get("ok"):
-            opt_count = selected.get("optCount", 0)
-            texts     = selected.get("texts", [])
-            if opt_count == 0:
-                return "dropdown_did_not_open", None
-            return f"option_not_found (opts={opt_count} {texts})", None
-
-        await page.wait_for_timeout(300)
-
-        # ── Step 2: set Create Time range to last N days ──────────────────
+        # ── Step 2: set Actual Arrive time date range ─────────────────────
         today      = datetime.date.today()
         start_date = today - datetime.timedelta(days=days)
+        start_str  = start_date.strftime("%Y/%m/%d 00:00:00")
+        end_str    = today.strftime("%Y/%m/%d 23:59:59")
 
-        # Open calendar by clicking the start date input
-        date_container = '[data-for="create_time_gt+create_time_lt"]'
-        start_input = page.locator(f'{date_container} input').first
-        await start_input.click()
+        # Verify the label and its inputs are present
+        picker_info = await page.evaluate("""() => {
+            const label = Array.from(document.querySelectorAll('.ssc-form-item-label'))
+                .find(el => /actual arriv/i.test((el.innerText || '').trim()));
+            if (!label) return {ok: false, msg: 'Actual Arrive label not found'};
+            const container = label.parentElement?.parentElement;
+            if (!container) return {ok: false, msg: 'container missing'};
+            const inputs = container.querySelectorAll('input');
+            if (inputs.length < 2) return {ok: false, msg: `only ${inputs.length} inputs`};
+            return {ok: true};
+        }""")
+        if not picker_info.get("ok"):
+            return f"arrive_time_picker_not_found: {picker_info.get('msg')}", None
+
+        # Open calendar by clicking the outer start date input
+        container_loc = page.locator('.ssc-form-item-label').filter(
+            has_text=re.compile(r'Actual Arriv', re.IGNORECASE)
+        ).locator('xpath=../..')
+        await container_loc.locator('input').first.click()
         await page.wait_for_timeout(600)
 
-        # Find cell indices in the calendar portal
+        # Find cell indices, then use Playwright locator.click() which dispatches
+        # all necessary events (pointerdown, mousedown, mouseup, click) correctly.
         indices = await page.evaluate(f"""() => {{
             const panel = document.querySelector('.ssc-picker-panel.ssc-date-range-panel');
             if (!panel) return {{ok: false, msg: 'panel not found'}};
@@ -126,7 +113,7 @@ async def check(page, warehouse: str, market: str, params: dict) -> tuple:
         await cell_loc.nth(indices["todayIdx"]).click()
         await page.wait_for_timeout(500)
 
-        # Click footer Confirm to commit the date range
+        # Click the footer Confirm button (ssc-picker-panel-footer-action-button)
         confirm_btn = page.locator('button.ssc-picker-panel-footer-action-button')
         if await confirm_btn.count() == 0:
             return "calendar_confirm_not_found", None
@@ -135,13 +122,13 @@ async def check(page, warehouse: str, market: str, params: dict) -> tuple:
 
         # ── Step 3: click Search ──────────────────────────────────────────
         clicked_search = await page.evaluate("""() => {
-            const btn = Array.from(document.querySelectorAll('button'))
-                .find(b => (b.innerText || '').trim() === 'Search');
+            const btn = Array.from(document.querySelectorAll('button')).find(
+                b => (b.innerText || '').trim() === 'Search'
+            );
             if (!btn) return false;
             btn.click();
             return true;
         }""")
-
         if not clicked_search:
             return "search_button_not_found", None
 
@@ -167,7 +154,6 @@ async def check(page, warehouse: str, market: str, params: dict) -> tuple:
             if t1 and t1 == t2:     # stable — table finished loading
                 total_text = t1
                 break
-
         if not total_text:
             return "total_counter_not_found", None
 
@@ -177,7 +163,7 @@ async def check(page, warehouse: str, market: str, params: dict) -> tuple:
 
         count   = int(match.group(1).replace(',', ''))
         adopted = count > 0
-        return f"{count}_replenishment_orders_in_{days}d", adopted
+        return f"{count}_inbound_orders_in_{days}d", adopted
 
     except Exception as e:
         return f"error: {e}", None

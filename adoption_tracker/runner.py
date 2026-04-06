@@ -24,7 +24,10 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
-from features import FEATURES, MARKETS
+from features import FEATURES, MARKETS, get_markets
+
+# Activity features used to determine if a warehouse is "active"
+ACTIVITY_FEATURE_NAMES = {"Basic Inbound Operation", "Basic Outbound Operation"}
 
 # ─── INFRASTRUCTURE CONSTANTS ─────────────────────────────────────────────────
 # Only change these if Shopee changes its domain structure.
@@ -230,12 +233,123 @@ async def _ensure_logged_in(page, url: str, label: str = ""):
     print("  ✓ Login detected — continuing.")
 
 
+# ─── ACTIVE WAREHOUSE DETECTION ──────────────────────────────────────────────
+
+async def _detect_active_warehouses(page, checkers: dict, checked_at: str,
+                                    results: list) -> dict:
+    """
+    Run Basic Inbound + Basic Outbound for every market/WH.
+    A warehouse is "active" if it adopts all activity features that apply
+    to its market.  Returns {market: [active_wh, ...]} and appends to results.
+    """
+    print("\n" + "=" * 58)
+    print("  PHASE 0 — Detecting active warehouses")
+    print("  (must adopt all applicable Basic Operation features)")
+    print("=" * 58)
+
+    activity_cfgs = [f for f in FEATURES if f["feature"] in ACTIVITY_FEATURE_NAMES]
+
+    # {(market, wh): {feature_name: adopted_bool_or_None}}
+    wh_adoption: dict[tuple, dict] = defaultdict(dict)
+
+    for feature_cfg in activity_cfgs:
+        feature_name = feature_cfg["feature"]
+        checker      = checkers.get(feature_name)
+        if not checker:
+            print(f"  ⚠️  No checker for '{feature_name}' — treating all WHs as passing")
+            continue
+
+        params = feature_cfg.get("params", {})
+        domain = feature_cfg.get("domain", "")
+        signal = checker.SIGNAL
+
+        for market in get_markets(feature_cfg):
+            warehouses = MARKETS.get(market, [])
+            if not warehouses:
+                continue
+
+            print(f"\n  [{feature_name}] {market} ({len(warehouses)} warehouses)")
+
+            if market in WMS_BASE_URLS:
+                await page.goto(WMS_BASE_URLS[market],
+                                wait_until="networkidle", timeout=60000)
+                if _is_login_page(page.url):
+                    await _wait_for_wms_app(page)
+
+            for i, whs in enumerate(warehouses):
+                print(f"    [{i+1:2d}/{len(warehouses)}] {whs:10s}", end=" ", flush=True)
+                try:
+                    url = WMS_BASE_URLS[market] + params["url_path"]
+                    await _navigate_and_switch_warehouse(page, url, market, whs)
+                    sig_val, adopted = await checker.check(page, whs, market, params)
+                    mark = "✅" if adopted else ("⚠️" if adopted is None else "❌")
+                    print(f"→ {sig_val} {mark}")
+                    wh_adoption[(market, whs)][feature_name] = adopted
+                    results.append({
+                        "market": market, "warehouse": whs,
+                        "feature": feature_name, "domain": domain,
+                        "signal": signal, "signal_value": sig_val,
+                        "adopted": adopted, "checked_at": checked_at,
+                    })
+                except Exception as e:
+                    print(f"→ ERROR: {e} ❌")
+                    wh_adoption[(market, whs)][feature_name] = None
+                    results.append({
+                        "market": market, "warehouse": whs,
+                        "feature": feature_name, "domain": domain,
+                        "signal": signal, "signal_value": f"error: {e}",
+                        "adopted": None, "checked_at": checked_at,
+                    })
+
+    # Build active_warehouses: WH must pass every activity feature configured for its market
+    active_warehouses: dict[str, list] = defaultdict(list)
+    for market, whs_list in MARKETS.items():
+        applicable = [
+            f["feature"] for f in activity_cfgs
+            if market in get_markets(f)
+        ]
+        for whs in whs_list:
+            fmap     = wh_adoption.get((market, whs), {})
+            is_active = all(fmap.get(fn) is True for fn in applicable)
+            if is_active:
+                active_warehouses[market].append(whs)
+
+    print(f"\n  Active warehouse summary:")
+    for market, whs_list in sorted(active_warehouses.items()):
+        all_whs = MARKETS.get(market, [])
+        inactive = [w for w in all_whs if w not in whs_list]
+        print(f"    {market}: active={whs_list}  inactive/skipped={inactive}")
+
+    return dict(active_warehouses)
+
+
 # ─── MAIN RUN LOOP ────────────────────────────────────────────────────────────
 
-async def run():
+async def run(filter_features: list[str] | None = None,
+              explicit_warehouses: list[str] | None = None):
     Path(OUTPUT_FILE).parent.mkdir(parents=True, exist_ok=True)
     checked_at = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     results    = []
+
+    active_features = (
+        [f for f in FEATURES if f["feature"] in filter_features]
+        if filter_features else FEATURES
+    )
+    if filter_features and not active_features:
+        print(f"⚠️  No features matched: {filter_features}")
+        return
+
+    # If the user pinned specific warehouses, narrow MARKETS to those WHs only.
+    # Derive market membership from the existing MARKETS mapping.
+    if explicit_warehouses:
+        explicit_set = set(explicit_warehouses)
+        for market in list(MARKETS.keys()):
+            MARKETS[market] = [w for w in MARKETS[market] if w in explicit_set]
+        # For any warehouse not yet in MARKETS (e.g. undiscovered), skip silently.
+        print(f"  📌 Explicit warehouses: {explicit_warehouses}")
+
+    # Active-WH detection runs only on a full (unfiltered, unpinned) run
+    run_activity_detection = not filter_features and not explicit_warehouses
 
     print("\n── Loading checkers " + "─" * 36)
     checkers = load_checkers()
@@ -258,10 +372,10 @@ async def run():
 
         # First-run: visit every required WMS market + admin portal
         # so the user can log in to all of them before the run starts.
-        needed_markets = {m for f in FEATURES for m in f["markets"]}
+        needed_markets = {m for f in active_features for m in get_markets(f)}
         needs_admin    = any(
             getattr(checkers.get(f["feature"]), "CHECK_TYPE", "") == "admin_portal"
-            for f in FEATURES
+            for f in active_features
         )
 
         if is_first_run:
@@ -299,7 +413,7 @@ async def run():
         print(f"\nProfile: {PROFILE_DIR}\n")
 
         # Auto-discover warehouses for markets without a hardcoded list
-        needed_markets = {m for f in FEATURES for m in f["markets"]}
+        needed_markets = {m for f in active_features for m in get_markets(f)}
         for market in sorted(needed_markets):
             if MARKETS.get(market):
                 continue
@@ -312,11 +426,28 @@ async def run():
                 page, market, WMS_BASE_URLS[market]
             )
 
-        # ── Feature loop ──────────────────────────────────────────────────────
-        for feature_cfg in FEATURES:
-            feature_name = feature_cfg["feature"]
-            checker      = checkers.get(feature_name)
+        # ── Phase 0: active-warehouse detection ───────────────────────────────
+        # Runs only on a full unfiltered/unpinned run.
+        # Results are appended directly so Basic features appear in the report.
+        wh_filter: dict | None = None   # None = use all MARKETS WHs
+        if run_activity_detection:
+            wh_filter = await _detect_active_warehouses(
+                page, checkers, checked_at, results
+            )
 
+        # ── Phase 1: Feature loop ─────────────────────────────────────────────
+        print("\n" + "=" * 58)
+        print("  PHASE 1 — Feature adoption checks")
+        print("=" * 58)
+
+        for feature_cfg in active_features:
+            feature_name = feature_cfg["feature"]
+
+            # Skip activity features already covered in Phase 0
+            if wh_filter is not None and feature_name in ACTIVITY_FEATURE_NAMES:
+                continue
+
+            checker = checkers.get(feature_name)
             if not checker:
                 print(f"\n⚠️  No checker for '{feature_name}' — skipping")
                 continue
@@ -324,16 +455,25 @@ async def run():
             check_type = checker.CHECK_TYPE
             signal     = checker.SIGNAL
             params     = feature_cfg.get("params", {})
+            domain     = feature_cfg.get("domain", "")
 
-            for market in feature_cfg["markets"]:
-                warehouses = MARKETS.get(market, [])
+            for market in get_markets(feature_cfg):
+                # Use active WHs from Phase 0 when available; else all MARKETS WHs
+                if wh_filter is not None:
+                    warehouses = wh_filter.get(market, [])
+                    if not warehouses:
+                        print(f"\n  ⏭️  {market}: no active warehouses — skipping '{feature_name}'")
+                        continue
+                else:
+                    warehouses = MARKETS.get(market, [])
                 if not warehouses:
                     print(f"\n⚠️  No warehouses for {market} — skipping '{feature_name}'")
                     continue
 
                 print(f"\n{'─'*58}")
                 print(f"  Feature : {feature_name}")
-                print(f"  Market  : {market}  ({len(warehouses)} warehouses)  [{check_type}]")
+                domain_str = f"  [{domain}]" if domain else ""
+                print(f"  Market  : {market}  ({len(warehouses)} warehouses)  [{check_type}]{domain_str}")
                 print(f"{'─'*58}")
 
                 # Pre-flight: ensure the market portal is accessible before looping
@@ -359,23 +499,24 @@ async def run():
 
                         results.append({
                             "market": market, "warehouse": whs,
-                            "feature": feature_name, "signal": signal,
-                            "signal_value": sig_val, "adopted": adopted,
-                            "checked_at": checked_at,
+                            "feature": feature_name, "domain": domain,
+                            "signal": signal, "signal_value": sig_val,
+                            "adopted": adopted, "checked_at": checked_at,
                         })
 
                     except Exception as e:
                         print(f"→ ERROR: {e} ❌")
                         results.append({
                             "market": market, "warehouse": whs,
-                            "feature": feature_name, "signal": signal,
-                            "signal_value": f"error: {e}", "adopted": None,
-                            "checked_at": checked_at,
+                            "feature": feature_name, "domain": domain,
+                            "signal": signal, "signal_value": f"error: {e}",
+                            "adopted": None, "checked_at": checked_at,
                         })
 
         await context.close()
 
     _save_excel(results, checked_at)
+    _generate_dashboard()
     total   = len(results)
     adopted = sum(1 for r in results if r["adopted"] is True)
     valid   = sum(1 for r in results if r["adopted"] is not None)
@@ -392,7 +533,7 @@ def _save_excel(results: list, checked_at: str):
     # ── Detail sheet ──────────────────────────────────────────────────────────
     ws = wb.active
     ws.title = "Detail"
-    headers  = ["Market", "Warehouse", "Feature", "Signal", "Signal Value", "Adopted", "Checked At"]
+    headers  = ["Market", "Warehouse", "Feature", "Domain", "Signal", "Signal Value", "Adopted", "Checked At"]
 
     green = PatternFill("solid", fgColor="C6EFCE")
     red   = PatternFill("solid", fgColor="FFC7CE")
@@ -413,15 +554,15 @@ def _save_excel(results: list, checked_at: str):
         adopted = r["adopted"]
         fill, font = (green, gf) if adopted else ((red, rf) if adopted is False else (warn, wf))
         row_vals = [
-            r["market"], r["warehouse"], r["feature"], r["signal"],
-            r["signal_value"],
+            r["market"], r["warehouse"], r["feature"], r.get("domain", ""),
+            r["signal"], r["signal_value"],
             "Yes" if adopted is True else ("No" if adopted is False else "Error"),
             r["checked_at"],
         ]
         for ci, v in enumerate(row_vals, 1):
             cell = ws.cell(row=ri, column=ci, value=v)
             cell.font = font; cell.fill = fill
-            cell.alignment = Alignment(horizontal="left" if ci in (3, 4, 5) else "center")
+            cell.alignment = Alignment(horizontal="left" if ci in (3, 4, 5, 6) else "center")
 
     tot  = len(results)
     yes  = sum(1 for r in results if r["adopted"] is True)
@@ -430,13 +571,13 @@ def _save_excel(results: list, checked_at: str):
     ws.cell(row=sr, column=6,
             value=f"{yes}/{tot} ({int(yes/tot*100) if tot else 0}%)").font = bold
 
-    for i, w in enumerate([8, 12, 32, 46, 28, 10, 22], 1):
+    for i, w in enumerate([8, 12, 32, 16, 46, 28, 10, 22], 1):
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = "A2"
 
     # ── Summary sheet ─────────────────────────────────────────────────────────
     ws2 = wb.create_sheet("Summary")
-    hdr = ["Feature", "Market", "Total", "Adopted", "Not Adopted", "Errors", "Adoption %"]
+    hdr = ["Feature", "Domain", "Market", "Total", "Adopted", "Not Adopted", "Errors", "Adoption %"]
     for c, h in enumerate(hdr, 1):
         cell = ws2.cell(row=1, column=c, value=h)
         cell.font = bold; cell.fill = grey
@@ -444,26 +585,62 @@ def _save_excel(results: list, checked_at: str):
 
     by_fm = defaultdict(list)
     for r in results:
-        by_fm[(r["feature"], r["market"])].append(r)
+        by_fm[(r["feature"], r.get("domain", ""), r["market"])].append(r)
 
-    for ri, ((feat, mkt), rows) in enumerate(sorted(by_fm.items()), 2):
+    for ri, ((feat, dom, mkt), rows) in enumerate(sorted(by_fm.items()), 2):
         t   = len(rows)
         yes = sum(1 for r in rows if r["adopted"] is True)
         no  = sum(1 for r in rows if r["adopted"] is False)
         err = sum(1 for r in rows if r["adopted"] is None)
         pct = f"{int(yes/t*100)}%" if t else "0%"
-        for c, v in enumerate([feat, mkt, t, yes, no, err, pct], 1):
+        for c, v in enumerate([feat, dom, mkt, t, yes, no, err, pct], 1):
             cell = ws2.cell(row=ri, column=c, value=v)
             cell.font = base
-            cell.alignment = Alignment(horizontal="left" if c == 1 else "center")
+            cell.alignment = Alignment(horizontal="left" if c in (1, 2) else "center")
 
-    for i, w in enumerate([36, 8, 8, 10, 14, 8, 12], 1):
+    for i, w in enumerate([36, 16, 8, 8, 10, 14, 8, 12], 1):
         ws2.column_dimensions[get_column_letter(i)].width = w
 
     wb.save(OUTPUT_FILE)
 
 
+# ─── DASHBOARD GENERATION ────────────────────────────────────────────────────
+
+def _generate_dashboard():
+    """Call generate_dashboard.py after every run to keep docs/index.html fresh."""
+    import subprocess, sys
+    script = HERE / "generate_dashboard.py"
+    if not script.exists():
+        print("⚠️  generate_dashboard.py not found — skipping HTML generation")
+        return
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        capture_output=True, text=True
+    )
+    if result.returncode == 0:
+        print(result.stdout.strip())
+    else:
+        print(f"⚠️  Dashboard generation failed:\n{result.stderr.strip()}")
+
+
 # ─── ENTRY POINT ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    import argparse
+    parser = argparse.ArgumentParser(description="WMS Adoption Tracker")
+    parser.add_argument(
+        "--feature", "-f",
+        nargs="+",
+        metavar="FEATURE",
+        help='Run only the named feature(s), e.g. --feature "Basic Outbound Operation"',
+    )
+    parser.add_argument(
+        "--warehouse", "-w",
+        nargs="+",
+        metavar="WH",
+        help="Run only these warehouse codes and skip active-WH detection, "
+             "e.g. --warehouse PHB PHIXP SGL",
+    )
+    args = parser.parse_args()
+    asyncio.run(run(filter_features=args.feature,
+                    explicit_warehouses=args.warehouse))

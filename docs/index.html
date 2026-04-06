@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WMS Feature Adoption Dashboard</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: 'Inter', system-ui, sans-serif; }
+  .cell-yes   { background:#dcfce7; color:#166534; font-weight:600; }
+  .cell-no    { background:#fee2e2; color:#991b1b; font-weight:600; }
+  .cell-err   { background:#fef9c3; color:#854d0e; font-weight:600; }
+  .cell-na    { background:#f3f4f6; color:#9ca3af; }
+  .pct-100    { background:#15803d; color:#fff; }
+  .pct-high   { background:#22c55e; color:#fff; }
+  .pct-mid    { background:#f59e0b; color:#fff; }
+  .pct-low    { background:#ef4444; color:#fff; }
+  .pct-zero   { background:#dc2626; color:#fff; }
+  .pct-na     { background:#e5e7eb; color:#9ca3af; }
+  .tab-active { background:#ee4d2d; color:#fff; }
+  .tab-idle   { background:#f3f4f6; color:#6b7280; cursor:pointer; }
+  .tab-idle:hover { background:#e5e7eb; }
+  table { border-collapse:collapse; }
+  th, td { border:1px solid #e5e7eb; }
+  thead th { background:#f9fafb; position:sticky; top:0; z-index:2; }
+  .sticky-col { position:sticky; left:0; z-index:1; background:#fff; }
+  thead .sticky-col { z-index:3; }
+  .scroll-x { overflow-x:auto; border:1px solid #e5e7eb; border-radius:8px; }
+
+  /* ── Tooltip icon ── */
+  .tip-wrap { display:inline-flex; align-items:center; gap:4px; cursor:default; }
+  .tip-icon { display:inline-flex; align-items:center; justify-content:center;
+              width:14px; height:14px; border-radius:50%; background:#94a3b8;
+              color:#fff; font-size:9px; font-weight:700; flex-shrink:0;
+              cursor:help; line-height:1; }
+  /* ── Floating tooltip portal (appended to <body> via JS) ── */
+  #tip-portal { display:none; position:fixed; z-index:9999;
+                background:#1e293b; color:#e2e8f0; font-size:11px; line-height:1.6;
+                padding:9px 12px; border-radius:7px; max-width:280px;
+                box-shadow:0 6px 20px rgba(0,0,0,.4); font-weight:400;
+                white-space:normal; pointer-events:none; }
+</style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+
+<!-- ── Floating tooltip portal (never clipped by table cells) ─── -->
+<div id="tip-portal"></div>
+
+<!-- ── Header ─────────────────────────────────────────────────── -->
+<div class="bg-white border-b border-gray-200 shadow-sm">
+  <div class="max-w-screen-xl mx-auto px-6 py-4 flex items-center justify-between flex-wrap gap-3">
+    <div class="flex items-center gap-3">
+      <span class="text-2xl">🏭</span>
+      <div>
+        <h1 class="text-xl font-bold text-gray-900">WMS Feature Adoption</h1>
+        <p class="text-xs text-gray-400">Last checked: <span id="checkedAt"></span></p>
+      </div>
+    </div>
+    <div class="flex gap-4 flex-wrap" id="kpiRow"></div>
+  </div>
+</div>
+
+<!-- ── Info Banner ────────────────────────────────────────────── -->
+<div class="max-w-screen-xl mx-auto px-6 mt-5">
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+
+    <div class="flex gap-3 items-start bg-white border border-blue-100 rounded-xl px-4 py-3 shadow-sm">
+      <span class="text-xl mt-0.5">📅</span>
+      <div>
+        <p class="text-xs font-semibold text-blue-700 uppercase tracking-wide mb-0.5">Data Update</p>
+        <p class="text-sm text-gray-700">
+          Updated <strong>weekly</strong>. Last update:
+          <span class="font-semibold text-gray-900" id="bannerDate"></span>
+        </p>
+      </div>
+    </div>
+
+    <div class="flex gap-3 items-start bg-white border border-green-100 rounded-xl px-4 py-3 shadow-sm">
+      <span class="text-xl mt-0.5">🏢</span>
+      <div>
+        <p class="text-xs font-semibold text-green-700 uppercase tracking-wide mb-0.5">Warehouse Scope</p>
+        <p class="text-sm text-gray-700">
+          Active warehouses only — those with <strong>≥ 1 inbound or outbound order</strong>
+          in the past 7 days.
+        </p>
+      </div>
+    </div>
+
+    <div class="flex gap-3 items-start bg-white border border-orange-100 rounded-xl px-4 py-3 shadow-sm">
+      <span class="text-xl mt-0.5">💡</span>
+      <div>
+        <p class="text-xs font-semibold text-orange-700 uppercase tracking-wide mb-0.5">Track a New Feature?</p>
+        <p class="text-sm text-gray-700">
+          Adding a feature requires testing before it goes live.
+          Contact <strong>zhengyu.chenzy</strong> to request tracking.
+        </p>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── Tabs ───────────────────────────────────────────────────── -->
+<div class="max-w-screen-xl mx-auto px-6 mt-6">
+  <div class="flex gap-2 flex-wrap" id="mainTabs">
+    <button onclick="showSection('overview')"  class="tab-active  px-4 py-2 rounded-lg text-sm font-medium" id="tab-overview">📊 Overview</button>
+    <button onclick="showSection('warehouse')" class="tab-idle px-4 py-2 rounded-lg text-sm font-medium" id="tab-warehouse">🏢 Warehouse Detail</button>
+  </div>
+</div>
+
+<!-- ── Overview Section ───────────────────────────────────────── -->
+<div id="sec-overview" class="max-w-screen-xl mx-auto px-6 mt-4">
+  <p class="text-sm text-gray-500 mb-3">Adoption rate per feature per market. Green ≥ 80% · Amber 40–79% · Red &lt; 40%</p>
+  <div class="scroll-x">
+    <table class="w-full text-sm" id="overviewTable"></table>
+  </div>
+</div>
+
+<!-- ── Warehouse Detail Section ───────────────────────────────── -->
+<div id="sec-warehouse" class="max-w-screen-xl mx-auto px-6 mt-4 hidden">
+  <div class="flex gap-2 flex-wrap mb-4" id="mktTabs"></div>
+  <div id="wh-tables"></div>
+</div>
+
+<!-- ── Legend ─────────────────────────────────────────────────── -->
+<div class="max-w-screen-xl mx-auto px-6 mt-6 pb-10">
+  <div class="flex flex-wrap gap-4 text-xs text-gray-500 items-center">
+    <span class="font-semibold text-gray-600">Legend:</span>
+    <span class="flex items-center gap-1"><span class="inline-block w-3 h-3 rounded-sm bg-green-600"></span> Adopted (≥80%)</span>
+    <span class="flex items-center gap-1"><span class="inline-block w-3 h-3 rounded-sm bg-yellow-400"></span> Partial (40–79%)</span>
+    <span class="flex items-center gap-1"><span class="inline-block w-3 h-3 rounded-sm bg-red-500"></span> Low / None (&lt;40%)</span>
+    <span class="flex items-center gap-1"><span class="inline-block w-3 h-3 rounded-sm bg-gray-200"></span> Not applicable</span>
+    <span class="ml-4">Warehouse cells: ✓ Adopted · ✗ Not adopted · ! Error</span>
+  </div>
+</div>
+
+<script>
+const DATA = {"markets": ["BR", "ID", "MY", "PH", "SG", "TH", "TW", "VN"], "features": ["Dynamic Wave Rule Setting", "Picking While Sorting", "Dynamic Replenishment", "MTO Exclusion of Non-Sellable Stock", "MTO Picking Task Generation"], "domains": {"MTO Picking Task Generation": "Move Transfer", "Dynamic Wave Rule Setting": "Outbound", "Picking While Sorting": "Outbound", "Dynamic Replenishment": "Inventory", "MTO Exclusion of Non-Sellable Stock": "Move Transfer"}, "feat_desc": {"Dynamic Wave Rule Setting": "Adopted if at least 1 rule is toggled ON in the Dynamic Wave Rule table (Rule Center → Wave Rule).", "Picking While Sorting": "Adopted if ≥5 operators have Picking Method = 'Sorting While Picking' in operator skill settings.", "Dynamic Replenishment": "Adopted if any replenishment orders with Source From = 'Replenishment Demand Pool' exist in the last 7 days.", "MTO Exclusion of Non-Sellable Stock": "Adopted if at least 1 Allocate Exclusion Rule is toggled ON in Rule Center → Allocate Rule (MTO tab).", "MTO Picking Task Generation": "Adopted if the 'Split MTO into multiple picking tasks' toggle is set to Yes in Rule Center → Picking Rule."}, "wh_by_mkt": {"BR": ["BRFGO1", "BRFMG1", "BRFPE1", "BRFRS1", "BRFSP1"], "ID": ["IDBGR1", "IDDPR1", "IDG", "IDH", "IDK", "IDLSC1", "IDM", "IDMSC1", "IDN", "IDNSC1", "IDP", "IDPBR1", "IDQ", "IDR", "IDS"], "MY": ["MYE", "MYJ", "MYK", "MYM", "MYP", "MYV", "MYX"], "PH": ["PHA", "PHB", "PHE", "PHG", "PHIXC", "PHIXP", "PHK", "PHL", "PHM", "PHP", "PHS", "PHTSDS", "PHU", "PHX"], "SG": ["SGC", "SGL", "SGP"], "TH": ["TH3PFW", "THA", "THBSC1", "THBWN1", "THO", "THP"], "TW": ["TWA", "TWE", "TWG", "TWH", "TWK", "TWT", "TWW", "TWX"], "VN": ["VNA", "VNCB", "VNCL", "VNDB", "VNDL", "VNN", "VNNL", "VNS", "VNVL", "VNWL"]}, "feat_mkt": {"Dynamic Wave Rule Setting": {"BR": {"yes": 0, "total": 5, "pct": 0}, "ID": {"yes": 1, "total": 15, "pct": 7}, "MY": {"yes": 1, "total": 7, "pct": 14}, "PH": {"yes": 2, "total": 14, "pct": 14}, "SG": {"yes": 0, "total": 3, "pct": 0}, "TH": {"yes": 1, "total": 6, "pct": 17}, "TW": {"yes": 0, "total": 8, "pct": 0}, "VN": {"yes": 8, "total": 10, "pct": 80}}, "Picking While Sorting": {"BR": {"yes": 0, "total": 5, "pct": 0}, "ID": {"yes": 2, "total": 15, "pct": 13}, "MY": {"yes": 1, "total": 7, "pct": 14}, "PH": {"yes": 0, "total": 14, "pct": 0}, "SG": {"yes": 1, "total": 3, "pct": 33}, "TH": {"yes": 2, "total": 6, "pct": 33}, "TW": {"yes": 0, "total": 8, "pct": 0}, "VN": {"yes": 3, "total": 10, "pct": 30}}, "Dynamic Replenishment": {"BR": {"yes": 0, "total": 5, "pct": 0}, "ID": {"yes": 2, "total": 15, "pct": 13}, "MY": {"yes": 1, "total": 7, "pct": 14}, "PH": {"yes": 3, "total": 14, "pct": 21}, "SG": {"yes": 0, "total": 3, "pct": 0}, "TH": {"yes": 2, "total": 6, "pct": 33}, "TW": {"yes": 0, "total": 8, "pct": 0}, "VN": {"yes": 0, "total": 10, "pct": 0}}, "MTO Exclusion of Non-Sellable Stock": {"BR": {"yes": 1, "total": 5, "pct": 20}, "ID": {"yes": 0, "total": 15, "pct": 0}, "MY": {"yes": 0, "total": 7, "pct": 0}, "PH": {"yes": 11, "total": 14, "pct": 79}, "SG": {"yes": 0, "total": 3, "pct": 0}, "TH": {"yes": 2, "total": 6, "pct": 33}, "TW": {"yes": 1, "total": 8, "pct": 12}, "VN": {"yes": 1, "total": 10, "pct": 10}}, "MTO Picking Task Generation": {"BR": {"yes": 1, "total": 5, "pct": 20}, "ID": {"yes": 0, "total": 15, "pct": 0}, "MY": {"yes": 0, "total": 7, "pct": 0}, "PH": {"yes": 7, "total": 14, "pct": 50}, "SG": {"yes": 0, "total": 3, "pct": 0}, "TH": {"yes": 0, "total": 6, "pct": 0}, "TW": {"yes": 0, "total": 8, "pct": 0}, "VN": {"yes": 7, "total": 10, "pct": 70}}}, "feat_total": {"Dynamic Wave Rule Setting": {"yes": 13, "total": 68, "pct": 19}, "Picking While Sorting": {"yes": 9, "total": 68, "pct": 13}, "Dynamic Replenishment": {"yes": 8, "total": 68, "pct": 12}, "MTO Exclusion of Non-Sellable Stock": {"yes": 16, "total": 68, "pct": 24}, "MTO Picking Task Generation": {"yes": 15, "total": 68, "pct": 22}}, "cells": {"BR|BRFGO1|MTO Picking Task Generation": "No", "BR|BRFMG1|MTO Picking Task Generation": "No", "BR|BRFPE1|MTO Picking Task Generation": "No", "BR|BRFRS1|MTO Picking Task Generation": "No", "BR|BRFSP1|MTO Picking Task Generation": "Yes", "ID|IDBGR1|MTO Picking Task Generation": "No", "ID|IDDPR1|MTO Picking Task Generation": "No", "ID|IDG|MTO Picking Task Generation": "No", "ID|IDH|MTO Picking Task Generation": "No", "ID|IDK|MTO Picking Task Generation": "No", "ID|IDLSC1|MTO Picking Task Generation": "No", "ID|IDM|MTO Picking Task Generation": "No", "ID|IDMSC1|MTO Picking Task Generation": "No", "ID|IDN|MTO Picking Task Generation": "No", "ID|IDNSC1|MTO Picking Task Generation": "No", "ID|IDP|MTO Picking Task Generation": "No", "ID|IDPBR1|MTO Picking Task Generation": "No", "ID|IDQ|MTO Picking Task Generation": "No", "ID|IDR|MTO Picking Task Generation": "No", "ID|IDS|MTO Picking Task Generation": "Error", "MY|MYE|MTO Picking Task Generation": "No", "MY|MYJ|MTO Picking Task Generation": "No", "MY|MYK|MTO Picking Task Generation": "No", "MY|MYM|MTO Picking Task Generation": "No", "MY|MYP|MTO Picking Task Generation": "No", "MY|MYV|MTO Picking Task Generation": "No", "MY|MYX|MTO Picking Task Generation": "No", "PH|PHA|MTO Picking Task Generation": "No", "PH|PHB|MTO Picking Task Generation": "Yes", "PH|PHE|MTO Picking Task Generation": "Yes", "PH|PHG|MTO Picking Task Generation": "Yes", "PH|PHIXC|MTO Picking Task Generation": "Yes", "PH|PHIXP|MTO Picking Task Generation": "Yes", "PH|PHK|MTO Picking Task Generation": "No", "PH|PHL|MTO Picking Task Generation": "Yes", "PH|PHM|MTO Picking Task Generation": "No", "PH|PHP|MTO Picking Task Generation": "No", "PH|PHS|MTO Picking Task Generation": "No", "PH|PHTSDS|MTO Picking Task Generation": "No", "PH|PHU|MTO Picking Task Generation": "Yes", "PH|PHX|MTO Picking Task Generation": "No", "SG|SGC|MTO Picking Task Generation": "No", "SG|SGL|MTO Picking Task Generation": "No", "SG|SGP|MTO Picking Task Generation": "No", "TH|TH3PFW|MTO Picking Task Generation": "No", "TH|THA|MTO Picking Task Generation": "No", "TH|THBSC1|MTO Picking Task Generation": "No", "TH|THBWN1|MTO Picking Task Generation": "No", "TH|THO|MTO Picking Task Generation": "No", "TH|THP|MTO Picking Task Generation": "No", "TW|TWA|MTO Picking Task Generation": "Error", "TW|TWE|MTO Picking Task Generation": "Error", "TW|TWG|MTO Picking Task Generation": "Error", "TW|TWH|MTO Picking Task Generation": "Error", "TW|TWK|MTO Picking Task Generation": "Error", "TW|TWT|MTO Picking Task Generation": "Error", "TW|TWW|MTO Picking Task Generation": "Error", "TW|TWX|MTO Picking Task Generation": "Error", "VN|VNA|MTO Picking Task Generation": "Yes", "VN|VNCB|MTO Picking Task Generation": "Yes", "VN|VNCL|MTO Picking Task Generation": "No", "VN|VNDB|MTO Picking Task Generation": "No", "VN|VNDL|MTO Picking Task Generation": "Yes", "VN|VNN|MTO Picking Task Generation": "Yes", "VN|VNNL|MTO Picking Task Generation": "Yes", "VN|VNS|MTO Picking Task Generation": "No", "VN|VNVL|MTO Picking Task Generation": "Yes", "VN|VNWL|MTO Picking Task Generation": "Yes", "BR|BRFGO1|Dynamic Wave Rule Setting": "No", "BR|BRFMG1|Dynamic Wave Rule Setting": "No", "BR|BRFPE1|Dynamic Wave Rule Setting": "Error", "BR|BRFRS1|Dynamic Wave Rule Setting": "No", "BR|BRFSP1|Dynamic Wave Rule Setting": "No", "ID|IDBGR1|Dynamic Wave Rule Setting": "No", "ID|IDDPR1|Dynamic Wave Rule Setting": "No", "ID|IDG|Dynamic Wave Rule Setting": "No", "ID|IDH|Dynamic Wave Rule Setting": "No", "ID|IDK|Dynamic Wave Rule Setting": "No", "ID|IDLSC1|Dynamic Wave Rule Setting": "Yes", "ID|IDM|Dynamic Wave Rule Setting": "No", "ID|IDMSC1|Dynamic Wave Rule Setting": "No", "ID|IDN|Dynamic Wave Rule Setting": "No", "ID|IDNSC1|Dynamic Wave Rule Setting": "No", "ID|IDP|Dynamic Wave Rule Setting": "No", "ID|IDPBR1|Dynamic Wave Rule Setting": "No", "ID|IDQ|Dynamic Wave Rule Setting": "No", "ID|IDR|Dynamic Wave Rule Setting": "No", "ID|IDS|Dynamic Wave Rule Setting": "No", "MY|MYE|Dynamic Wave Rule Setting": "No", "MY|MYJ|Dynamic Wave Rule Setting": "No", "MY|MYK|Dynamic Wave Rule Setting": "Yes", "MY|MYM|Dynamic Wave Rule Setting": "No", "MY|MYP|Dynamic Wave Rule Setting": "No", "MY|MYV|Dynamic Wave Rule Setting": "No", "MY|MYX|Dynamic Wave Rule Setting": "No", "PH|PHA|Dynamic Wave Rule Setting": "No", "PH|PHB|Dynamic Wave Rule Setting": "No", "PH|PHE|Dynamic Wave Rule Setting": "No", "PH|PHG|Dynamic Wave Rule Setting": "No", "PH|PHIXC|Dynamic Wave Rule Setting": "No", "PH|PHIXP|Dynamic Wave Rule Setting": "Yes", "PH|PHK|Dynamic Wave Rule Setting": "No", "PH|PHL|Dynamic Wave Rule Setting": "No", "PH|PHM|Dynamic Wave Rule Setting": "Yes", "PH|PHP|Dynamic Wave Rule Setting": "No", "PH|PHS|Dynamic Wave Rule Setting": "No", "PH|PHTSDS|Dynamic Wave Rule Setting": "No", "PH|PHU|Dynamic Wave Rule Setting": "No", "PH|PHX|Dynamic Wave Rule Setting": "No", "SG|SGC|Dynamic Wave Rule Setting": "No", "SG|SGL|Dynamic Wave Rule Setting": "No", "SG|SGP|Dynamic Wave Rule Setting": "No", "TH|TH3PFW|Dynamic Wave Rule Setting": "No", "TH|THA|Dynamic Wave Rule Setting": "No", "TH|THBSC1|Dynamic Wave Rule Setting": "Yes", "TH|THBWN1|Dynamic Wave Rule Setting": "No", "TH|THO|Dynamic Wave Rule Setting": "No", "TH|THP|Dynamic Wave Rule Setting": "No", "TW|TWA|Dynamic Wave Rule Setting": "No", "TW|TWE|Dynamic Wave Rule Setting": "No", "TW|TWG|Dynamic Wave Rule Setting": "No", "TW|TWH|Dynamic Wave Rule Setting": "No", "TW|TWK|Dynamic Wave Rule Setting": "No", "TW|TWT|Dynamic Wave Rule Setting": "No", "TW|TWW|Dynamic Wave Rule Setting": "No", "TW|TWX|Dynamic Wave Rule Setting": "No", "VN|VNA|Dynamic Wave Rule Setting": "Yes", "VN|VNCB|Dynamic Wave Rule Setting": "Yes", "VN|VNCL|Dynamic Wave Rule Setting": "Yes", "VN|VNDB|Dynamic Wave Rule Setting": "Yes", "VN|VNDL|Dynamic Wave Rule Setting": "Yes", "VN|VNN|Dynamic Wave Rule Setting": "Yes", "VN|VNNL|Dynamic Wave Rule Setting": "Yes", "VN|VNS|Dynamic Wave Rule Setting": "No", "VN|VNVL|Dynamic Wave Rule Setting": "Yes", "VN|VNWL|Dynamic Wave Rule Setting": "No", "BR|BRFGO1|Picking While Sorting": "No", "BR|BRFMG1|Picking While Sorting": "No", "BR|BRFPE1|Picking While Sorting": "No", "BR|BRFRS1|Picking While Sorting": "No", "BR|BRFSP1|Picking While Sorting": "No", "ID|IDBGR1|Picking While Sorting": "No", "ID|IDDPR1|Picking While Sorting": "No", "ID|IDG|Picking While Sorting": "No", "ID|IDH|Picking While Sorting": "No", "ID|IDK|Picking While Sorting": "No", "ID|IDLSC1|Picking While Sorting": "Yes", "ID|IDM|Picking While Sorting": "No", "ID|IDMSC1|Picking While Sorting": "No", "ID|IDN|Picking While Sorting": "No", "ID|IDNSC1|Picking While Sorting": "Yes", "ID|IDP|Picking While Sorting": "No", "ID|IDPBR1|Picking While Sorting": "No", "ID|IDQ|Picking While Sorting": "No", "ID|IDR|Picking While Sorting": "No", "ID|IDS|Picking While Sorting": "No", "MY|MYE|Picking While Sorting": "No", "MY|MYJ|Picking While Sorting": "No", "MY|MYK|Picking While Sorting": "No", "MY|MYM|Picking While Sorting": "No", "MY|MYP|Picking While Sorting": "No", "MY|MYV|Picking While Sorting": "Yes", "MY|MYX|Picking While Sorting": "No", "PH|PHA|Picking While Sorting": "No", "PH|PHB|Picking While Sorting": "No", "PH|PHE|Picking While Sorting": "No", "PH|PHG|Picking While Sorting": "No", "PH|PHIXC|Picking While Sorting": "No", "PH|PHIXP|Picking While Sorting": "No", "PH|PHK|Picking While Sorting": "No", "PH|PHL|Picking While Sorting": "No", "PH|PHM|Picking While Sorting": "No", "PH|PHP|Picking While Sorting": "No", "PH|PHS|Picking While Sorting": "No", "PH|PHTSDS|Picking While Sorting": "No", "PH|PHU|Picking While Sorting": "No", "PH|PHX|Picking While Sorting": "No", "SG|SGC|Picking While Sorting": "No", "SG|SGL|Picking While Sorting": "Yes", "SG|SGP|Picking While Sorting": "No", "TH|TH3PFW|Picking While Sorting": "No", "TH|THA|Picking While Sorting": "Yes", "TH|THBSC1|Picking While Sorting": "No", "TH|THBWN1|Picking While Sorting": "No", "TH|THO|Picking While Sorting": "Yes", "TH|THP|Picking While Sorting": "No", "TW|TWA|Picking While Sorting": "Error", "TW|TWE|Picking While Sorting": "Error", "TW|TWG|Picking While Sorting": "Error", "TW|TWH|Picking While Sorting": "Error", "TW|TWK|Picking While Sorting": "Error", "TW|TWT|Picking While Sorting": "Error", "TW|TWW|Picking While Sorting": "Error", "TW|TWX|Picking While Sorting": "Error", "VN|VNA|Picking While Sorting": "No", "VN|VNCB|Picking While Sorting": "No", "VN|VNCL|Picking While Sorting": "No", "VN|VNDB|Picking While Sorting": "No", "VN|VNDL|Picking While Sorting": "No", "VN|VNN|Picking While Sorting": "Yes", "VN|VNNL|Picking While Sorting": "Yes", "VN|VNS|Picking While Sorting": "Yes", "VN|VNVL|Picking While Sorting": "No", "VN|VNWL|Picking While Sorting": "No", "BR|BRFGO1|Dynamic Replenishment": "No", "BR|BRFMG1|Dynamic Replenishment": "No", "BR|BRFPE1|Dynamic Replenishment": "No", "BR|BRFRS1|Dynamic Replenishment": "No", "BR|BRFSP1|Dynamic Replenishment": "No", "ID|IDBGR1|Dynamic Replenishment": "No", "ID|IDDPR1|Dynamic Replenishment": "No", "ID|IDG|Dynamic Replenishment": "No", "ID|IDH|Dynamic Replenishment": "No", "ID|IDK|Dynamic Replenishment": "Yes", "ID|IDLSC1|Dynamic Replenishment": "No", "ID|IDM|Dynamic Replenishment": "No", "ID|IDMSC1|Dynamic Replenishment": "No", "ID|IDN|Dynamic Replenishment": "No", "ID|IDNSC1|Dynamic Replenishment": "No", "ID|IDP|Dynamic Replenishment": "No", "ID|IDPBR1|Dynamic Replenishment": "Yes", "ID|IDQ|Dynamic Replenishment": "No", "ID|IDR|Dynamic Replenishment": "No", "ID|IDS|Dynamic Replenishment": "No", "MY|MYE|Dynamic Replenishment": "No", "MY|MYJ|Dynamic Replenishment": "No", "MY|MYK|Dynamic Replenishment": "Yes", "MY|MYM|Dynamic Replenishment": "No", "MY|MYP|Dynamic Replenishment": "No", "MY|MYV|Dynamic Replenishment": "No", "MY|MYX|Dynamic Replenishment": "No", "PH|PHA|Dynamic Replenishment": "No", "PH|PHB|Dynamic Replenishment": "Yes", "PH|PHE|Dynamic Replenishment": "No", "PH|PHG|Dynamic Replenishment": "No", "PH|PHIXC|Dynamic Replenishment": "No", "PH|PHIXP|Dynamic Replenishment": "Yes", "PH|PHK|Dynamic Replenishment": "No", "PH|PHL|Dynamic Replenishment": "Yes", "PH|PHM|Dynamic Replenishment": "No", "PH|PHP|Dynamic Replenishment": "No", "PH|PHS|Dynamic Replenishment": "No", "PH|PHTSDS|Dynamic Replenishment": "No", "PH|PHU|Dynamic Replenishment": "No", "PH|PHX|Dynamic Replenishment": "No", "SG|SGC|Dynamic Replenishment": "No", "SG|SGL|Dynamic Replenishment": "No", "SG|SGP|Dynamic Replenishment": "No", "TH|TH3PFW|Dynamic Replenishment": "No", "TH|THA|Dynamic Replenishment": "Yes", "TH|THBSC1|Dynamic Replenishment": "No", "TH|THBWN1|Dynamic Replenishment": "Yes", "TH|THO|Dynamic Replenishment": "No", "TH|THP|Dynamic Replenishment": "No", "TW|TWA|Dynamic Replenishment": "Error", "TW|TWE|Dynamic Replenishment": "Error", "TW|TWG|Dynamic Replenishment": "Error", "TW|TWH|Dynamic Replenishment": "Error", "TW|TWK|Dynamic Replenishment": "Error", "TW|TWT|Dynamic Replenishment": "Error", "TW|TWW|Dynamic Replenishment": "Error", "TW|TWX|Dynamic Replenishment": "Error", "VN|VNA|Dynamic Replenishment": "No", "VN|VNCB|Dynamic Replenishment": "No", "VN|VNCL|Dynamic Replenishment": "No", "VN|VNDB|Dynamic Replenishment": "No", "VN|VNDL|Dynamic Replenishment": "No", "VN|VNN|Dynamic Replenishment": "No", "VN|VNNL|Dynamic Replenishment": "No", "VN|VNS|Dynamic Replenishment": "No", "VN|VNVL|Dynamic Replenishment": "No", "VN|VNWL|Dynamic Replenishment": "No", "BR|BRFGO1|MTO Exclusion of Non-Sellable Stock": "No", "BR|BRFMG1|MTO Exclusion of Non-Sellable Stock": "No", "BR|BRFPE1|MTO Exclusion of Non-Sellable Stock": "No", "BR|BRFRS1|MTO Exclusion of Non-Sellable Stock": "No", "BR|BRFSP1|MTO Exclusion of Non-Sellable Stock": "Yes", "ID|IDBGR1|MTO Exclusion of Non-Sellable Stock": "No", "ID|IDDPR1|MTO Exclusion of Non-Sellable Stock": "No", "ID|IDG|MTO Exclusion of Non-Sellable Stock": "No", "ID|IDH|MTO Exclusion of Non-Sellable Stock": "No", "ID|IDK|MTO Exclusion of Non-Sellable Stock": "No", "ID|IDLSC1|MTO Exclusion of Non-Sellable Stock": "No", "ID|IDM|MTO Exclusion of Non-Sellable Stock": "No", "ID|IDMSC1|MTO Exclusion of Non-Sellable Stock": "No", "ID|IDN|MTO Exclusion of Non-Sellable Stock": "No", "ID|IDNSC1|MTO Exclusion of Non-Sellable Stock": "No", "ID|IDP|MTO Exclusion of Non-Sellable Stock": "No", "ID|IDPBR1|MTO Exclusion of Non-Sellable Stock": "No", "ID|IDQ|MTO Exclusion of Non-Sellable Stock": "No", "ID|IDR|MTO Exclusion of Non-Sellable Stock": "No", "ID|IDS|MTO Exclusion of Non-Sellable Stock": "No", "MY|MYE|MTO Exclusion of Non-Sellable Stock": "No", "MY|MYJ|MTO Exclusion of Non-Sellable Stock": "No", "MY|MYK|MTO Exclusion of Non-Sellable Stock": "No", "MY|MYM|MTO Exclusion of Non-Sellable Stock": "No", "MY|MYP|MTO Exclusion of Non-Sellable Stock": "No", "MY|MYV|MTO Exclusion of Non-Sellable Stock": "No", "MY|MYX|MTO Exclusion of Non-Sellable Stock": "No", "PH|PHA|MTO Exclusion of Non-Sellable Stock": "No", "PH|PHB|MTO Exclusion of Non-Sellable Stock": "Yes", "PH|PHE|MTO Exclusion of Non-Sellable Stock": "Yes", "PH|PHG|MTO Exclusion of Non-Sellable Stock": "Yes", "PH|PHIXC|MTO Exclusion of Non-Sellable Stock": "Yes", "PH|PHIXP|MTO Exclusion of Non-Sellable Stock": "Yes", "PH|PHK|MTO Exclusion of Non-Sellable Stock": "Yes", "PH|PHL|MTO Exclusion of Non-Sellable Stock": "Yes", "PH|PHM|MTO Exclusion of Non-Sellable Stock": "Yes", "PH|PHP|MTO Exclusion of Non-Sellable Stock": "No", "PH|PHS|MTO Exclusion of Non-Sellable Stock": "No", "PH|PHTSDS|MTO Exclusion of Non-Sellable Stock": "Yes", "PH|PHU|MTO Exclusion of Non-Sellable Stock": "Yes", "PH|PHX|MTO Exclusion of Non-Sellable Stock": "Yes", "SG|SGC|MTO Exclusion of Non-Sellable Stock": "No", "SG|SGL|MTO Exclusion of Non-Sellable Stock": "No", "SG|SGP|MTO Exclusion of Non-Sellable Stock": "No", "TH|TH3PFW|MTO Exclusion of Non-Sellable Stock": "No", "TH|THA|MTO Exclusion of Non-Sellable Stock": "Yes", "TH|THBSC1|MTO Exclusion of Non-Sellable Stock": "No", "TH|THBWN1|MTO Exclusion of Non-Sellable Stock": "No", "TH|THO|MTO Exclusion of Non-Sellable Stock": "Yes", "TH|THP|MTO Exclusion of Non-Sellable Stock": "No", "TW|TWA|MTO Exclusion of Non-Sellable Stock": "Yes", "TW|TWE|MTO Exclusion of Non-Sellable Stock": "No", "TW|TWG|MTO Exclusion of Non-Sellable Stock": "No", "TW|TWH|MTO Exclusion of Non-Sellable Stock": "No", "TW|TWK|MTO Exclusion of Non-Sellable Stock": "No", "TW|TWT|MTO Exclusion of Non-Sellable Stock": "No", "TW|TWW|MTO Exclusion of Non-Sellable Stock": "No", "TW|TWX|MTO Exclusion of Non-Sellable Stock": "No", "VN|VNA|MTO Exclusion of Non-Sellable Stock": "No", "VN|VNCB|MTO Exclusion of Non-Sellable Stock": "No", "VN|VNCL|MTO Exclusion of Non-Sellable Stock": "No", "VN|VNDB|MTO Exclusion of Non-Sellable Stock": "No", "VN|VNDL|MTO Exclusion of Non-Sellable Stock": "No", "VN|VNN|MTO Exclusion of Non-Sellable Stock": "No", "VN|VNNL|MTO Exclusion of Non-Sellable Stock": "No", "VN|VNS|MTO Exclusion of Non-Sellable Stock": "Yes", "VN|VNVL|MTO Exclusion of Non-Sellable Stock": "No", "VN|VNWL|MTO Exclusion of Non-Sellable Stock": "No"}, "stats": {"total": 340, "adopted": 61, "not_adopted": 253, "errors": 26, "pct": 18, "wh_count": 68, "mkt_count": 8, "feat_count": 5, "checked_at": "2026-04-06"}};
+
+/* ── KPI row + banner date ────────────────────────────────────── */
+const s = DATA.stats;
+document.getElementById("checkedAt").textContent = s.checked_at;
+document.getElementById("bannerDate").textContent = s.checked_at;
+document.getElementById("kpiRow").innerHTML = [
+  ["Markets",    s.mkt_count,  "text-blue-600"],
+  ["Warehouses", s.wh_count,   "text-indigo-600"],
+  ["Features",   s.feat_count, "text-purple-600"],
+  ["Adoption",   s.pct + "%",  s.pct >= 70 ? "text-green-600" : s.pct >= 40 ? "text-yellow-600" : "text-red-600"],
+].map(([label, val, cls]) =>
+  `<div class="text-center">
+     <div class="text-2xl font-bold ${cls}">${val}</div>
+     <div class="text-xs text-gray-400 mt-0.5">${label}</div>
+   </div>`
+).join('<div class="w-px bg-gray-200 self-stretch mx-1"></div>');
+
+/* ── Section toggle ───────────────────────────────────────────── */
+function showSection(id) {
+  ["overview","warehouse"].forEach(s => {
+    document.getElementById("sec-"+s).classList.toggle("hidden", s !== id);
+    const btn = document.getElementById("tab-"+s);
+    btn.classList.toggle("tab-active", s === id);
+    btn.classList.toggle("tab-idle",   s !== id);
+  });
+}
+
+/* ── PCT cell class ───────────────────────────────────────────── */
+function pctClass(pct) {
+  if (pct === null)  return "pct-na";
+  if (pct === 100)   return "pct-100";
+  if (pct >= 80)     return "pct-high";
+  if (pct >= 40)     return "pct-mid";
+  if (pct > 0)       return "pct-low";
+  return "pct-zero";
+}
+
+/* ── Floating tooltip portal ──────────────────────────────────── */
+(function initTooltip() {
+  const portal = document.getElementById("tip-portal");
+  let active = null;
+
+  document.addEventListener("mouseover", e => {
+    const icon = e.target.closest(".tip-icon");
+    if (!icon) return;
+    const text = icon.dataset.tip;
+    if (!text) return;
+    active = icon;
+    portal.textContent = text;
+    portal.style.display = "block";
+  });
+
+  document.addEventListener("mousemove", e => {
+    if (!active) return;
+    const gap = 14;
+    const pw  = portal.offsetWidth, ph = portal.offsetHeight;
+    const vw  = window.innerWidth,   vh = window.innerHeight;
+    let x = e.clientX + gap, y = e.clientY + gap;
+    if (x + pw > vw - 8) x = e.clientX - pw - gap;
+    if (y + ph > vh - 8) y = e.clientY - ph - gap;
+    portal.style.left = x + "px";
+    portal.style.top  = y + "px";
+  });
+
+  document.addEventListener("mouseout", e => {
+    if (e.target.closest(".tip-icon")) {
+      portal.style.display = "none";
+      active = null;
+    }
+  });
+})();
+
+/* ── Tooltip cell helper ──────────────────────────────────────── */
+function tipCell(label, description, extraClass = "") {
+  const esc = description.replace(/"/g, "&quot;");
+  return `<td class="sticky-col px-3 py-2 text-sm text-gray-800 whitespace-nowrap font-medium ${extraClass}">
+    <span class="tip-wrap">
+      ${label}
+      <span class="tip-icon" data-tip="${esc}">?</span>
+    </span>
+  </td>`;
+}
+
+/* ── Overview table ───────────────────────────────────────────── */
+(function buildOverview() {
+  const { features, markets, feat_mkt, feat_total, domains, feat_desc } = DATA;
+
+  let html = "<thead><tr>"
+    + `<th class="sticky-col text-left px-3 py-2 text-xs font-semibold text-gray-600 whitespace-nowrap">Feature</th>`
+    + `<th class="px-3 py-2 text-xs font-semibold text-gray-600 whitespace-nowrap">Domain</th>`
+    + markets.map(m =>
+        `<th class="px-3 py-2 text-xs font-semibold text-gray-600 text-center whitespace-nowrap">${m}</th>`
+      ).join("")
+    + `<th class="px-3 py-2 text-xs font-semibold text-gray-800 text-center whitespace-nowrap bg-gray-100 border-l-2 border-gray-300">Total</th>`
+    + "</tr></thead><tbody>";
+
+  let prevDomain = null;
+  features.forEach((feat, i) => {
+    const domain = domains[feat] || "";
+
+    // Domain group separator row
+    if (domain !== prevDomain) {
+      html += `<tr><td colspan="${markets.length + 3}"
+        style="background:#1e293b;color:#94a3b8;font-size:10px;font-weight:700;
+               letter-spacing:.08em;padding:4px 12px;text-transform:uppercase;">
+        ${domain || "Other"}
+      </td></tr>`;
+      prevDomain = domain;
+    }
+
+    const bg = i % 2 === 0 ? "bg-white" : "bg-gray-50/50";
+    html += `<tr class="${bg}">`;
+    html += tipCell(feat, feat_desc[feat] || "");
+    html += `<td class="px-3 py-2 text-xs text-gray-400 whitespace-nowrap">${domain}</td>`;
+
+    markets.forEach(mkt => {
+      const d = feat_mkt[feat]?.[mkt];
+      if (!d) {
+        html += `<td class="px-3 py-2 pct-na text-center text-xs">—</td>`;
+      } else {
+        const cls = pctClass(d.pct);
+        html += `<td class="px-3 py-2 ${cls} text-center text-xs font-bold" title="${d.yes}/${d.total} warehouses">${d.pct}%</td>`;
+      }
+    });
+
+    // Total column
+    const t = feat_total[feat];
+    if (t) {
+      const cls = pctClass(t.pct);
+      html += `<td class="px-3 py-2 ${cls} text-center text-xs font-bold border-l-2 border-gray-300"
+                   title="${t.yes}/${t.total} warehouses across all markets">${t.pct}%<br>
+               <span style="font-weight:400;font-size:9px;opacity:.85">${t.yes}/${t.total}</span></td>`;
+    } else {
+      html += `<td class="px-3 py-2 pct-na text-center text-xs border-l-2 border-gray-300">—</td>`;
+    }
+
+    html += "</tr>";
+  });
+  html += "</tbody>";
+  document.getElementById("overviewTable").innerHTML = html;
+})();
+
+/* ── Warehouse tables ─────────────────────────────────────────── */
+(function buildWarehouse() {
+  const { features, wh_by_mkt, cells, domains, feat_desc } = DATA;
+  const markets = Object.keys(wh_by_mkt);
+  const tabsEl  = document.getElementById("mktTabs");
+  const tbls    = document.getElementById("wh-tables");
+
+  markets.forEach((mkt, idx) => {
+    // tab button
+    const btn = document.createElement("button");
+    btn.id        = `mkt-tab-${mkt}`;
+    btn.textContent = mkt;
+    btn.className = (idx === 0 ? "tab-active" : "tab-idle") + " px-4 py-2 rounded-lg text-sm font-medium";
+    btn.onclick   = () => showMkt(mkt);
+    tabsEl.appendChild(btn);
+
+    // table wrapper
+    const wrap = document.createElement("div");
+    wrap.id = `mkt-${mkt}`;
+    wrap.className = (idx === 0 ? "" : "hidden") + " scroll-x";
+
+    const whs = wh_by_mkt[mkt];
+    let html = "<table class='w-full text-xs'><thead><tr>"
+      + `<th class="sticky-col px-3 py-2 text-left font-semibold text-gray-600">Warehouse</th>`
+      + features.map(f => {
+          const short = f.length > 18 ? f.slice(0,17)+"…" : f;
+          const dom   = domains[f] || "";
+          const desc  = (feat_desc[f] || "").replace(/"/g, "&quot;");
+          return `<th class="px-2 py-2 font-semibold text-gray-600 text-center whitespace-nowrap">
+            <span class="tip-wrap" style="justify-content:center">
+              <span>${short}</span>
+              <span class="tip-icon" data-tip="${desc}">?</span>
+            </span>
+            <br><span style="font-weight:400;font-size:9px;color:#94a3b8">${dom}</span>
+          </th>`;
+        }).join("")
+      + "</tr></thead><tbody>";
+
+    whs.forEach((wh, i) => {
+      const bg = i % 2 === 0 ? "bg-white" : "bg-gray-50/50";
+      html += `<tr class="${bg}"><td class="sticky-col px-3 py-2 font-medium text-gray-800 whitespace-nowrap">${wh}</td>`;
+      features.forEach(feat => {
+        const val = cells[`${mkt}|${wh}|${feat}`];
+        if (val === undefined) {
+          html += `<td class="cell-na px-2 py-2 text-center">—</td>`;
+        } else if (val === "Yes") {
+          html += `<td class="cell-yes px-2 py-2 text-center">✓</td>`;
+        } else if (val === "No") {
+          html += `<td class="cell-no px-2 py-2 text-center">✗</td>`;
+        } else {
+          html += `<td class="cell-err px-2 py-2 text-center">!</td>`;
+        }
+      });
+      html += "</tr>";
+    });
+    html += "</tbody></table>";
+    wrap.innerHTML = html;
+    tbls.appendChild(wrap);
+  });
+
+  function showMkt(active) {
+    markets.forEach(m => {
+      document.getElementById(`mkt-${m}`).classList.toggle("hidden", m !== active);
+      const btn = document.getElementById(`mkt-tab-${m}`);
+      btn.classList.toggle("tab-active", m === active);
+      btn.classList.toggle("tab-idle",   m !== active);
+    });
+  }
+})();
+</script>
+</body>
+</html>
