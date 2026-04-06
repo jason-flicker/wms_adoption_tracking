@@ -29,34 +29,39 @@ async def check(page, warehouse: str, market: str, params: dict) -> tuple:
         await page.wait_for_load_state("networkidle", timeout=15000)
 
         # ── Step 1: open the Picking Method dropdown ──────────────────────
-        # The label cell text starts with "Picking Meth" (truncated).
-        # Walk up from that label to its container row, then click the
-        # first non-disabled .ant-select found inside that container.
+        # Label and dropdown may be siblings in a grid layout (not nested),
+        # so walking up the DOM won't find the select from inside the label.
+        # Instead: find the .ant-select-selector whose bounding box sits on
+        # the same horizontal row and immediately to the right of the label.
         clicked = await page.evaluate("""() => {
-            const allEls = Array.from(document.querySelectorAll('*'));
-
-            // Find the visible label that says "Picking Method" (may be truncated)
-            const label = allEls.find(el =>
+            // Find the visible label — allow child elements (tooltip icons etc.)
+            const label = Array.from(document.querySelectorAll('*')).find(el =>
                 el.offsetParent !== null &&
-                el.children.length === 0 &&
-                /^Picking Met/i.test((el.innerText || '').trim())
+                /^Picking Met/i.test((el.innerText || '').trim()) &&
+                el.getBoundingClientRect().width < 300
             );
             if (!label) return {ok: false, msg: 'Picking Method label not found'};
 
-            // Walk up to find a container that holds an ant-select dropdown
-            let node = label.parentElement;
-            for (let i = 0; i < 6; i++) {
-                if (!node) break;
-                const sel = node.querySelector(
-                    '.ant-select:not(.ant-select-disabled) .ant-select-selector'
-                );
-                if (sel) {
-                    sel.click();
-                    return {ok: true};
-                }
-                node = node.parentElement;
+            const lRect = label.getBoundingClientRect();
+
+            // Among all visible .ant-select-selector elements, pick the one
+            // that is on the same row (vertically overlapping) and closest to
+            // the right edge of the label.
+            const selectors = Array.from(
+                document.querySelectorAll('.ant-select-selector')
+            );
+            let best = null, bestDist = Infinity;
+            for (const sel of selectors) {
+                const r = sel.getBoundingClientRect();
+                const sameRow = r.top <= lRect.bottom + 8 && r.bottom >= lRect.top - 8;
+                const toRight = r.left >= lRect.right - 4;
+                if (!sameRow || !toRight) continue;
+                const dist = r.left - lRect.right;
+                if (dist < bestDist) { bestDist = dist; best = sel; }
             }
-            return {ok: false, msg: 'ant-select not found near label'};
+            if (!best) return {ok: false, msg: 'no ant-select-selector found on same row to the right'};
+            best.click();
+            return {ok: true, dist: bestDist};
         }""")
 
         if not clicked.get("ok"):
